@@ -129,6 +129,26 @@ async function apiInsertRecord(session, record) {
   return { ...rows[0], value: Number(rows[0].value) };
 }
 
+async function apiUpdateRecord(session, id, record) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/records?id=eq.${id}`, {
+    method: "PATCH",
+    headers: authHeaders(session, { Prefer: "return=representation" }),
+    body: JSON.stringify(record),
+  });
+  if (!res.ok) throw new Error("Erro ao atualizar registro.");
+  const rows = await res.json();
+  return { ...rows[0], value: Number(rows[0].value) };
+}
+
+async function apiDeleteRecord(session, id) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/records?id=eq.${id}`, {
+    method: "DELETE",
+    headers: authHeaders(session),
+  });
+  if (!res.ok) throw new Error("Erro ao excluir registro.");
+  return true;
+}
+
 async function apiFetchSettings(session) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/settings?user_id=eq.${session.user.id}&select=invest_pct`,
@@ -364,6 +384,7 @@ function MainApp({ session, onLogout }) {
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [showInvestEditor, setShowInvestEditor] = useState(false);
   const [modalType, setModalType] = useState(null);
+  const [editingRecord, setEditingRecord] = useState(null);
   const [savedPulse, setSavedPulse] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
@@ -403,6 +424,22 @@ function MainApp({ session, onLogout }) {
     } catch (e) { setErrorMsg(e.message); }
   }
 
+  async function updateRecord(id, rec) {
+    try {
+      const saved = await apiUpdateRecord(session, id, rec);
+      setRecordsByMonth((p) => ({ ...p, [month]: (p[month] || []).map((r) => (r.id === id ? saved : r)) }));
+      pulse();
+    } catch (e) { setErrorMsg(e.message); }
+  }
+
+  async function deleteRecord(id) {
+    try {
+      await apiDeleteRecord(session, id);
+      setRecordsByMonth((p) => ({ ...p, [month]: (p[month] || []).filter((r) => r.id !== id) }));
+      pulse();
+    } catch (e) { setErrorMsg(e.message); }
+  }
+
   async function setInvestPct(pct) {
     setInvestPctState(pct);
     try { await apiUpsertSettings(session, pct); pulse(); } catch (e) { setErrorMsg(e.message); }
@@ -435,13 +472,22 @@ function MainApp({ session, onLogout }) {
           {view === "overview" ? (
             <Overview totals={totals} investPct={investPct} investCalc={investCalc} onOpenInvestEditor={() => setShowInvestEditor(true)} loading={!settingsLoaded || loadingRecords} />
           ) : (
-            <Records records={activeRecords} loading={loadingRecords} onNewRecord={() => setModalType("receita")} />
+            <Records records={activeRecords} loading={loadingRecords} onNewRecord={() => setModalType("receita")} onEditRecord={(r) => setEditingRecord(r)} />
           )}
         </main>
       </div>
       <MobileTabBar view={view} setView={setView} onLogout={onLogout} />
       {showInvestEditor && <InvestEditor pct={investPct} onChange={setInvestPct} onClose={() => setShowInvestEditor(false)} />}
       {modalType && <NewRecordModal initialType={modalType} onClose={() => setModalType(null)} onSave={(rec) => { addRecord(rec); setModalType(null); }} />}
+      {editingRecord && (
+        <NewRecordModal
+          initialType={editingRecord.type}
+          existingRecord={editingRecord}
+          onClose={() => setEditingRecord(null)}
+          onSave={(rec) => { updateRecord(editingRecord.id, rec); setEditingRecord(null); }}
+          onDelete={() => { deleteRecord(editingRecord.id); setEditingRecord(null); }}
+        />
+      )}
     </div>
   );
 }
@@ -597,7 +643,7 @@ function InvestEditor({ pct, onChange, onClose }) {
 
 /* --------------------------------- records ------------------------------------ */
 
-function Records({ records, loading, onNewRecord }) {
+function Records({ records, loading, onNewRecord, onEditRecord }) {
   const [tab, setTab] = useState("receitas");
   const activeTab = TABS.find((t) => t.id === tab);
   const filtered = records.filter((r) => activeTab.types.includes(r.type));
@@ -635,19 +681,25 @@ function Records({ records, loading, onNewRecord }) {
                 <th className="px-4 py-3 font-medium">Data</th>
                 <th className="px-4 py-3 font-medium">Tipo</th>
                 <th className="px-4 py-3 font-medium text-right">Valor</th>
+                <th className="px-4 py-3 font-medium w-8"></th>
               </tr>
             </thead>
             <tbody>
               {loading && (
-                <tr><td colSpan={5} style={{ color: C.inkSoft }} className="px-4 py-10 text-center text-sm">Carregando registros…</td></tr>
+                <tr><td colSpan={6} style={{ color: C.inkSoft }} className="px-4 py-10 text-center text-sm">Carregando registros…</td></tr>
               )}
               {!loading && filtered.length === 0 && (
-                <tr><td colSpan={5} style={{ color: C.inkSoft }} className="px-4 py-10 text-center text-sm">Nenhum registro nesta aba ainda. Use "Novo registro" para adicionar o primeiro.</td></tr>
+                <tr><td colSpan={6} style={{ color: C.inkSoft }} className="px-4 py-10 text-center text-sm">Nenhum registro nesta aba ainda. Use "Novo registro" para adicionar o primeiro.</td></tr>
               )}
               {!loading && filtered.map((r) => {
                 const meta = TYPE_META[r.type];
                 return (
-                  <tr key={r.id} style={{ borderColor: C.line }} className="border-b last:border-0">
+                  <tr
+                    key={r.id}
+                    onClick={() => onEditRecord(r)}
+                    style={{ borderColor: C.line }}
+                    className="border-b last:border-0 cursor-pointer hover:bg-black/[0.03] transition"
+                  >
                     <td style={{ color: C.ink }} className="px-4 py-3">{r.description}</td>
                     <td style={{ color: C.inkSoft }} className="px-4 py-3">{r.category}</td>
                     <td style={{ color: C.inkSoft }} className="px-4 py-3">{r.date?.split("-").reverse().join("/")}</td>
@@ -655,11 +707,15 @@ function Records({ records, loading, onNewRecord }) {
                       <span style={{ background: meta.color + "22", color: meta.color }} className="text-xs px-2 py-1 rounded-full font-medium whitespace-nowrap">{meta.label}</span>
                     </td>
                     <td style={{ color: C.ink }} className="px-4 py-3 text-right font-medium">{currency(r.value)}</td>
+                    <td className="px-2 py-3" style={{ color: C.inkSoft }}><ChevronRight size={15} /></td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+          {!loading && filtered.length > 0 && (
+            <p style={{ color: C.inkSoft, borderColor: C.line }} className="text-xs px-4 py-2.5 border-t">Toque em um registro para editar ou excluir.</p>
+          )}
         </div>
 
         <div style={{ background: C.card, borderColor: C.line }} className="rounded-xl border p-5 flex flex-col">
@@ -687,13 +743,15 @@ function Records({ records, loading, onNewRecord }) {
 
 /* ------------------------------- new record modal ------------------------------ */
 
-function NewRecordModal({ initialType, onClose, onSave }) {
+function NewRecordModal({ initialType, existingRecord, onClose, onSave, onDelete }) {
+  const isEdit = !!existingRecord;
   const [type, setType] = useState(initialType);
-  const [date, setDate] = useState("");
-  const [description, setDescription] = useState("");
-  const [value, setValue] = useState("");
-  const [category, setCategory] = useState(CATEGORY_OPTIONS[initialType][0]);
+  const [date, setDate] = useState(existingRecord?.date || "");
+  const [description, setDescription] = useState(existingRecord?.description || "");
+  const [value, setValue] = useState(existingRecord ? String(existingRecord.value) : "");
+  const [category, setCategory] = useState(existingRecord?.category || CATEGORY_OPTIONS[initialType][0]);
   const [saving, setSaving] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   function handleTypeChange(t) { setType(t); setCategory(CATEGORY_OPTIONS[t][0]); }
   const meta = TYPE_META[type];
@@ -702,7 +760,7 @@ function NewRecordModal({ initialType, onClose, onSave }) {
     <div className="fixed inset-0 z-40 flex items-center justify-center p-4" style={{ background: "rgba(19,32,25,0.45)" }}>
       <div style={{ background: C.card }} className="w-full max-w-lg rounded-xl p-6 relative max-h-[90vh] overflow-auto">
         <button onClick={onClose} style={{ color: C.inkSoft }} className="absolute top-4 right-4 hover:text-black"><X size={18} /></button>
-        <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-lg mb-5">Novo registro</p>
+        <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-lg mb-5">{isEdit ? "Editar registro" : "Novo registro"}</p>
 
         <p style={{ color: C.inkSoft }} className="text-xs uppercase tracking-wide font-medium mb-2">Tipo de registro</p>
         <div className="grid grid-cols-2 gap-2 mb-5">
@@ -747,8 +805,31 @@ function NewRecordModal({ initialType, onClose, onSave }) {
             style={{ background: C.ink, color: C.paper, opacity: saving ? 0.7 : 1 }}
             className="mt-2 rounded-lg py-2.5 text-sm font-medium hover:opacity-90 transition flex items-center justify-center gap-2"
           >
-            {saving ? <><Loader2 size={15} className="animate-spin" /> Salvando…</> : "Salvar registro"}
+            {saving ? <><Loader2 size={15} className="animate-spin" /> Salvando…</> : isEdit ? "Salvar alterações" : "Salvar registro"}
           </button>
+
+          {isEdit && (
+            <div style={{ borderColor: C.line }} className="border-t pt-4 mt-1">
+              {!confirmingDelete ? (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingDelete(true)}
+                  style={{ color: C.rust }}
+                  className="text-xs font-medium hover:underline"
+                >
+                  Excluir este registro
+                </button>
+              ) : (
+                <div style={{ background: C.rustSoft }} className="rounded-lg p-3 flex items-center justify-between gap-3 flex-wrap">
+                  <span style={{ color: C.rust }} className="text-xs">Tem certeza? Essa ação não pode ser desfeita.</span>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => setConfirmingDelete(false)} style={{ color: C.inkSoft }} className="text-xs px-2 py-1">Cancelar</button>
+                    <button type="button" onClick={onDelete} style={{ background: C.rust, color: "#fff" }} className="text-xs px-3 py-1.5 rounded-md font-medium">Excluir</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
