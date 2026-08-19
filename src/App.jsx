@@ -5,6 +5,7 @@ import {
 import {
   Wallet, TrendingDown, PiggyBank, Settings2, LogOut, LayoutGrid, ListChecks,
   Plus, X, ChevronLeft, ChevronRight, Lock, Mail, User, ArrowRight, Check, Loader2,
+  StickyNote, Trash2, Camera, CircleX, CheckCircle2, Circle, UserRound, CalendarDays,
 } from "lucide-react";
 
 /* ------------------------------- supabase config ----------------------------- */
@@ -151,22 +152,57 @@ async function apiDeleteRecord(session, id) {
 
 async function apiFetchSettings(session) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/settings?user_id=eq.${session.user.id}&select=invest_pct`,
+    `${SUPABASE_URL}/rest/v1/settings?user_id=eq.${session.user.id}&select=invest_pct,name,age,avatar_data`,
     { headers: authHeaders(session) }
   );
   if (!res.ok) throw new Error("Erro ao buscar configurações.");
   const rows = await res.json();
-  return rows[0]?.invest_pct ?? null;
+  return rows[0] || null;
 }
 
-async function apiUpsertSettings(session, investPct) {
+async function apiUpsertSettings(session, patch) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/settings`, {
     method: "POST",
     headers: authHeaders(session, { Prefer: "resolution=merge-duplicates,return=representation" }),
-    body: JSON.stringify({ user_id: session.user.id, invest_pct: investPct }),
+    body: JSON.stringify({ user_id: session.user.id, ...patch }),
   });
   if (!res.ok) throw new Error("Erro ao salvar configuração.");
+  const rows = await res.json();
+  return rows[0];
+}
+
+async function apiFetchNotes(session) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/notes?order=created_at.desc`, { headers: authHeaders(session) });
+  if (!res.ok) throw new Error("Erro ao buscar anotações.");
   return res.json();
+}
+
+async function apiInsertNote(session, note) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/notes`, {
+    method: "POST",
+    headers: authHeaders(session, { Prefer: "return=representation" }),
+    body: JSON.stringify({ ...note, user_id: session.user.id }),
+  });
+  if (!res.ok) throw new Error("Erro ao salvar anotação.");
+  const rows = await res.json();
+  return rows[0];
+}
+
+async function apiUpdateNote(session, id, patch) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/notes?id=eq.${id}`, {
+    method: "PATCH",
+    headers: authHeaders(session, { Prefer: "return=representation" }),
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error("Erro ao atualizar anotação.");
+  const rows = await res.json();
+  return rows[0];
+}
+
+async function apiDeleteNote(session, id) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/notes?id=eq.${id}`, { method: "DELETE", headers: authHeaders(session) });
+  if (!res.ok) throw new Error("Erro ao excluir anotação.");
+  return true;
 }
 
 /* ---------------------------------- tokens --------------------------------- */
@@ -175,7 +211,7 @@ const C = {
   ink: "#132019", inkSoft: "#41504A", paper: "#F1EFE3", paperDeep: "#E7E3D2",
   card: "#FBFAF4", line: "#D8D4C0", emerald: "#1F6F54", emeraldSoft: "#DCEAE1",
   rust: "#B3492F", rustSoft: "#F3DED6", amber: "#C97B3D", gold: "#B8842E",
-  goldSoft: "#F0E3C8", slate: "#4B7B8C",
+  goldSoft: "#F0E3C8", slate: "#4B7B8C", slateSoft: "#DCE9EC",
 };
 
 const PIE_PALETTE = ["#1F6F54", "#B3492F", "#B8842E", "#4B7B8C", "#7A5C8E", "#C97B3D", "#5C7A4E"];
@@ -381,7 +417,10 @@ function MainApp({ session, onLogout }) {
   const [recordsByMonth, setRecordsByMonth] = useState({});
   const [loadingRecords, setLoadingRecords] = useState(true);
   const [investPct, setInvestPctState] = useState(10);
+  const [profile, setProfile] = useState({ name: "", age: "", avatar_data: null });
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [notes, setNotes] = useState([]);
+  const [notesLoaded, setNotesLoaded] = useState(false);
   const [showInvestEditor, setShowInvestEditor] = useState(false);
   const [modalType, setModalType] = useState(null);
   const [editingRecord, setEditingRecord] = useState(null);
@@ -391,11 +430,23 @@ function MainApp({ session, onLogout }) {
   useEffect(() => {
     (async () => {
       try {
-        const pct = await apiFetchSettings(session);
-        if (pct === null) { await apiUpsertSettings(session, 10); setInvestPctState(10); }
-        else setInvestPctState(pct);
+        const row = await apiFetchSettings(session);
+        if (!row) {
+          await apiUpsertSettings(session, { invest_pct: 10 });
+          setInvestPctState(10);
+        } else {
+          setInvestPctState(row.invest_pct ?? 10);
+          setProfile({ name: row.name || "", age: row.age ?? "", avatar_data: row.avatar_data || null });
+        }
       } catch (e) { setErrorMsg(e.message); }
       setSettingsLoaded(true);
+    })();
+    (async () => {
+      try {
+        const rows = await apiFetchNotes(session);
+        setNotes(rows);
+      } catch (e) { setErrorMsg(e.message); }
+      setNotesLoaded(true);
     })();
   }, []);
 
@@ -442,7 +493,33 @@ function MainApp({ session, onLogout }) {
 
   async function setInvestPct(pct) {
     setInvestPctState(pct);
-    try { await apiUpsertSettings(session, pct); pulse(); } catch (e) { setErrorMsg(e.message); }
+    try { await apiUpsertSettings(session, { invest_pct: pct }); pulse(); } catch (e) { setErrorMsg(e.message); }
+  }
+
+  async function saveProfile(patch) {
+    const next = { ...profile, ...patch };
+    setProfile(next);
+    try { await apiUpsertSettings(session, patch); pulse(); } catch (e) { setErrorMsg(e.message); }
+  }
+
+  async function addNote(note) {
+    try {
+      const saved = await apiInsertNote(session, note);
+      setNotes((p) => [saved, ...p]);
+      pulse();
+    } catch (e) { setErrorMsg(e.message); }
+  }
+
+  async function toggleNote(id, completed) {
+    setNotes((p) => p.map((n) => (n.id === id ? { ...n, completed } : n)));
+    try { await apiUpdateNote(session, id, { completed }); } catch (e) { setErrorMsg(e.message); }
+  }
+
+  async function deleteNote(id) {
+    try {
+      await apiDeleteNote(session, id);
+      setNotes((p) => p.filter((n) => n.id !== id));
+    } catch (e) { setErrorMsg(e.message); }
   }
 
   const totals = useMemo(() => {
@@ -454,7 +531,7 @@ function MainApp({ session, onLogout }) {
 
   return (
     <div style={{ background: C.paper, fontFamily: "Inter, system-ui, sans-serif" }} className="min-h-screen w-full flex">
-      <Sidebar view={view} setView={setView} onLogout={onLogout} userEmail={session.user?.email} />
+      <Sidebar view={view} setView={setView} onLogout={onLogout} userEmail={session.user?.email} profile={profile} />
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar
           month={month} savedPulse={savedPulse}
@@ -469,10 +546,25 @@ function MainApp({ session, onLogout }) {
           </div>
         )}
         <main className="flex-1 p-6 md:p-8 pb-24 md:pb-8 overflow-auto">
-          {view === "overview" ? (
+          {view === "overview" && (
             <Overview totals={totals} investPct={investPct} investCalc={investCalc} onOpenInvestEditor={() => setShowInvestEditor(true)} loading={!settingsLoaded || loadingRecords} />
-          ) : (
-            <Records records={activeRecords} loading={loadingRecords} onNewRecord={() => setModalType("receita")} onEditRecord={(r) => setEditingRecord(r)} />
+          )}
+          {view === "records" && (
+            <Records
+              records={activeRecords}
+              loading={loadingRecords}
+              onNewRecord={() => setModalType("receita")}
+              onEditRecord={(r) => setEditingRecord(r)}
+              totals={totals}
+              investPct={investPct}
+              investCalc={investCalc}
+            />
+          )}
+          {view === "notes" && (
+            <NotesView notes={notes} loaded={notesLoaded} onAdd={addNote} onToggle={toggleNote} onDelete={deleteNote} />
+          )}
+          {view === "profile" && (
+            <ProfileView profile={profile} email={session.user?.email} onSave={saveProfile} loaded={settingsLoaded} />
           )}
         </main>
       </div>
@@ -496,8 +588,10 @@ function MainApp({ session, onLogout }) {
 
 function MobileTabBar({ view, setView, onLogout }) {
   const items = [
-    { id: "overview", label: "Visão geral", icon: LayoutGrid },
+    { id: "overview", label: "Geral", icon: LayoutGrid },
     { id: "records", label: "Registros", icon: ListChecks },
+    { id: "notes", label: "Metas", icon: StickyNote },
+    { id: "profile", label: "Perfil", icon: UserRound },
   ];
   return (
     <nav
@@ -512,9 +606,9 @@ function MobileTabBar({ view, setView, onLogout }) {
             key={it.id}
             onClick={() => setView(it.id)}
             style={{ color: active ? C.gold : C.paperDeep }}
-            className="flex flex-col items-center justify-center gap-1 flex-1 py-2.5 text-[11px] font-medium"
+            className="flex flex-col items-center justify-center gap-1 flex-1 py-2.5 text-[10px] font-medium"
           >
-            <Icon size={19} />
+            <Icon size={18} />
             {it.label}
           </button>
         );
@@ -522,9 +616,9 @@ function MobileTabBar({ view, setView, onLogout }) {
       <button
         onClick={onLogout}
         style={{ color: C.paperDeep }}
-        className="flex flex-col items-center justify-center gap-1 flex-1 py-2.5 text-[11px] font-medium"
+        className="flex flex-col items-center justify-center gap-1 flex-1 py-2.5 text-[10px] font-medium"
       >
-        <LogOut size={19} />
+        <LogOut size={18} />
         Sair
       </button>
     </nav>
@@ -533,10 +627,12 @@ function MobileTabBar({ view, setView, onLogout }) {
 
 /* --------------------------------- sidebar ------------------------------------ */
 
-function Sidebar({ view, setView, onLogout, userEmail }) {
+function Sidebar({ view, setView, onLogout, userEmail, profile }) {
   const items = [
     { id: "overview", label: "Visão geral", icon: LayoutGrid },
     { id: "records", label: "Registros", icon: ListChecks },
+    { id: "notes", label: "Anotações", icon: StickyNote },
+    { id: "profile", label: "Perfil", icon: UserRound },
   ];
   return (
     <aside style={{ background: C.ink }} className="w-60 shrink-0 hidden md:flex flex-col justify-between py-6 px-4">
@@ -559,12 +655,16 @@ function Sidebar({ view, setView, onLogout, userEmail }) {
         </nav>
       </div>
       <div>
-        <div style={{ borderColor: "rgba(255,255,255,0.1)" }} className="border-t pt-4 mb-2 flex items-center gap-2 px-2">
-          <div style={{ background: C.emerald }} className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium">
-            <span style={{ color: C.paper }}>{(userEmail || "V")[0].toUpperCase()}</span>
-          </div>
-          <span style={{ color: C.paperDeep }} className="text-sm truncate">{userEmail}</span>
-        </div>
+        <button onClick={() => setView("profile")} style={{ borderColor: "rgba(255,255,255,0.1)" }} className="border-t pt-4 mb-2 flex items-center gap-2 px-2 w-full hover:opacity-80 transition">
+          {profile?.avatar_data ? (
+            <img src={profile.avatar_data} alt="" className="w-7 h-7 rounded-full object-cover shrink-0" />
+          ) : (
+            <div style={{ background: C.emerald }} className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium shrink-0">
+              <span style={{ color: C.paper }}>{(profile?.name || userEmail || "V")[0].toUpperCase()}</span>
+            </div>
+          )}
+          <span style={{ color: C.paperDeep }} className="text-sm truncate">{profile?.name || userEmail}</span>
+        </button>
         <button onClick={onLogout} style={{ color: C.paperDeep }} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm hover:bg-white/5 transition">
           <LogOut size={16} /> Sair
         </button>
@@ -643,10 +743,11 @@ function InvestEditor({ pct, onChange, onClose }) {
 
 /* --------------------------------- records ------------------------------------ */
 
-function Records({ records, loading, onNewRecord, onEditRecord }) {
+function Records({ records, loading, onNewRecord, onEditRecord, totals, investPct, investCalc }) {
   const [tab, setTab] = useState("receitas");
   const activeTab = TABS.find((t) => t.id === tab);
   const filtered = records.filter((r) => activeTab.types.includes(r.type));
+  const sobraCalculada = (totals?.receita || 0) - (totals?.despesas || 0);
 
   const pieData = useMemo(() => {
     const map = {};
@@ -671,9 +772,52 @@ function Records({ records, loading, onNewRecord, onEditRecord }) {
         </button>
       </div>
 
+      {tab === "sobra_invest" && (
+        <div className="grid sm:grid-cols-2 gap-4 mb-5">
+          <div style={{ background: C.goldSoft, borderColor: C.gold + "44" }} className="rounded-xl border p-4">
+            <p style={{ color: C.gold }} className="text-xs font-medium uppercase tracking-wide mb-1">Sobra calculada (receita − despesas)</p>
+            <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-xl">{currency(sobraCalculada)}</p>
+          </div>
+          <div style={{ background: C.slateSoft || C.goldSoft, borderColor: C.slate + "44" }} className="rounded-xl border p-4">
+            <p style={{ color: C.slate }} className="text-xs font-medium uppercase tracking-wide mb-1">Sugestão de investimento ({investPct}% da receita)</p>
+            <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-xl">{currency(investCalc)}</p>
+          </div>
+        </div>
+      )}
+
       <div className="grid lg:grid-cols-3 gap-5">
         <div style={{ background: C.card, borderColor: C.line }} className="lg:col-span-2 rounded-xl border overflow-hidden">
-          <table className="w-full text-sm">
+          {/* mobile: lista em cards, sem rolagem lateral */}
+          <div className="sm:hidden divide-y" style={{ borderColor: C.line }}>
+            {loading && <p style={{ color: C.inkSoft }} className="px-4 py-10 text-center text-sm">Carregando registros…</p>}
+            {!loading && filtered.length === 0 && (
+              <p style={{ color: C.inkSoft }} className="px-4 py-10 text-center text-sm">Nenhum registro nesta aba ainda. Use "Novo registro" para adicionar o primeiro.</p>
+            )}
+            {!loading && filtered.map((r) => {
+              const meta = TYPE_META[r.type];
+              return (
+                <button
+                  key={r.id}
+                  onClick={() => onEditRecord(r)}
+                  style={{ borderColor: C.line }}
+                  className="w-full text-left px-4 py-3 flex items-center justify-between gap-3 hover:bg-black/[0.03] transition"
+                >
+                  <div className="min-w-0">
+                    <p style={{ color: C.ink }} className="text-sm font-medium truncate">{r.description}</p>
+                    <p style={{ color: C.inkSoft }} className="text-xs mt-0.5 truncate">{r.category} · {r.date?.split("-").reverse().join("/")}</p>
+                    <span style={{ background: meta.color + "22", color: meta.color }} className="inline-block text-[10px] px-2 py-0.5 rounded-full font-medium mt-1.5">{meta.label}</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span style={{ color: C.ink }} className="text-sm font-semibold">{currency(r.value)}</span>
+                    <ChevronRight size={15} style={{ color: C.inkSoft }} />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* desktop/tablet: tabela completa */}
+          <table className="w-full text-sm hidden sm:table">
             <thead>
               <tr style={{ borderColor: C.line, color: C.inkSoft }} className="border-b text-left">
                 <th className="px-4 py-3 font-medium">Descrição</th>
@@ -831,6 +975,199 @@ function NewRecordModal({ initialType, existingRecord, onClose, onSave, onDelete
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- notes -------------------------------------- */
+
+function isOverdue(note) {
+  if (note.completed || !note.due_date) return false;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return new Date(note.due_date + "T00:00:00") < today;
+}
+
+function NotesView({ notes, loaded, onAdd, onToggle, onDelete }) {
+  const [showForm, setShowForm] = useState(false);
+  const [title, setTitle] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const pending = notes.filter((n) => !n.completed);
+  const done = notes.filter((n) => n.completed);
+
+  async function handleAdd() {
+    if (!title.trim()) return;
+    setSaving(true);
+    await onAdd({ title: title.trim(), due_date: dueDate || null, completed: false });
+    setTitle(""); setDueDate(""); setShowForm(false);
+    setSaving(false);
+  }
+
+  return (
+    <div className="max-w-2xl">
+      <div className="flex items-center justify-between mb-5">
+        <div>
+          <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-xl">Anotações & metas</p>
+          <p style={{ color: C.inkSoft }} className="text-sm mt-0.5">Marque como concluído quando terminar. Prazos vencidos aparecem com um X.</p>
+        </div>
+        <button onClick={() => setShowForm((s) => !s)} style={{ background: C.ink, color: C.paper }} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-90 transition shrink-0">
+          <Plus size={16} /> Nova
+        </button>
+      </div>
+
+      {showForm && (
+        <div style={{ background: C.card, borderColor: C.line }} className="rounded-xl border p-4 mb-5 flex flex-col gap-3">
+          <Field label="Título da meta ou anotação" icon={<StickyNote size={15} />}>
+            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex: Juntar reserva de emergência" className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
+          </Field>
+          <Field label="Prazo (opcional)" icon={<CalendarDays size={15} />}>
+            <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
+          </Field>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setShowForm(false)} style={{ color: C.inkSoft, borderColor: C.line }} className="flex-1 border rounded-lg py-2 text-sm">Cancelar</button>
+            <button type="button" disabled={saving} onClick={handleAdd} style={{ background: C.ink, color: C.paper, opacity: saving ? 0.7 : 1 }} className="flex-1 rounded-lg py-2 text-sm font-medium flex items-center justify-center gap-2">
+              {saving ? <Loader2 size={15} className="animate-spin" /> : "Salvar"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!loaded ? (
+        <p style={{ color: C.inkSoft }} className="text-sm">Carregando…</p>
+      ) : notes.length === 0 ? (
+        <p style={{ color: C.inkSoft }} className="text-sm">Nenhuma anotação ainda. Use "Nova" para começar.</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {[...pending, ...done].map((n) => {
+            const overdue = isOverdue(n);
+            return (
+              <div key={n.id} style={{ background: C.card, borderColor: C.line }} className="rounded-xl border p-3.5 flex items-center gap-3">
+                <button
+                  onClick={() => onToggle(n.id, !n.completed)}
+                  title={n.completed ? "Marcar como pendente" : "Marcar como concluída"}
+                  style={{ color: n.completed ? C.emerald : overdue ? C.rust : C.inkSoft }}
+                  className="shrink-0"
+                >
+                  {n.completed ? <CheckCircle2 size={22} /> : overdue ? <CircleX size={22} /> : <Circle size={22} />}
+                </button>
+                <div className="min-w-0 flex-1">
+                  <p style={{ color: n.completed ? C.inkSoft : C.ink, textDecoration: n.completed ? "line-through" : "none" }} className="text-sm font-medium truncate">
+                    {n.title}
+                  </p>
+                  {n.due_date && (
+                    <p style={{ color: overdue ? C.rust : C.inkSoft }} className="text-xs mt-0.5">
+                      {overdue ? "Venceu em " : "Prazo: "}{n.due_date.split("-").reverse().join("/")}
+                    </p>
+                  )}
+                </div>
+                <button onClick={() => onDelete(n.id)} style={{ color: C.inkSoft }} className="shrink-0 hover:text-black transition">
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* --------------------------------- profile -------------------------------------- */
+
+function resizeImageToDataUrl(file, maxSize = 240) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Não foi possível ler a imagem."));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Arquivo de imagem inválido."));
+      img.onload = () => {
+        const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", 0.8));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function ProfileView({ profile, email, onSave, loaded }) {
+  const [name, setName] = useState(profile?.name || "");
+  const [age, setAge] = useState(profile?.age ?? "");
+  const [avatar, setAvatar] = useState(profile?.avatar_data || null);
+  const [saving, setSaving] = useState(false);
+  const [imgError, setImgError] = useState("");
+
+  useEffect(() => {
+    setName(profile?.name || "");
+    setAge(profile?.age ?? "");
+    setAvatar(profile?.avatar_data || null);
+  }, [profile?.name, profile?.age, profile?.avatar_data]);
+
+  async function handlePhoto(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImgError("");
+    try {
+      const dataUrl = await resizeImageToDataUrl(file);
+      setAvatar(dataUrl);
+    } catch (err) {
+      setImgError(err.message);
+    }
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    await onSave({ name: name.trim() || null, age: age === "" ? null : Number(age), avatar_data: avatar });
+    setSaving(false);
+  }
+
+  if (!loaded) return <p style={{ color: C.inkSoft }} className="text-sm">Carregando…</p>;
+
+  return (
+    <div className="max-w-md">
+      <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-xl mb-1">Seu perfil</p>
+      <p style={{ color: C.inkSoft }} className="text-sm mb-6">Essas informações ficam só na sua conta.</p>
+
+      <div className="flex items-center gap-4 mb-6">
+        <div style={{ background: C.paperDeep }} className="w-20 h-20 rounded-full overflow-hidden flex items-center justify-center shrink-0">
+          {avatar ? <img src={avatar} alt="" className="w-full h-full object-cover" /> : <UserRound size={30} style={{ color: C.inkSoft }} />}
+        </div>
+        <label style={{ borderColor: C.line, color: C.ink }} className="border rounded-lg px-3 py-2 text-sm font-medium flex items-center gap-2 cursor-pointer hover:bg-black/5 transition">
+          <Camera size={15} /> {avatar ? "Trocar foto" : "Adicionar foto"}
+          <input type="file" accept="image/*" onChange={handlePhoto} className="hidden" />
+        </label>
+      </div>
+      {imgError && <p style={{ color: C.rust }} className="text-xs mb-4">{imgError}</p>}
+
+      <div className="flex flex-col gap-4">
+        <Field label="E-mail" icon={<Mail size={16} />}>
+          <span className="w-full text-sm" style={{ color: C.inkSoft }}>{email}</span>
+        </Field>
+        <Field label="Nome" icon={<User size={16} />}>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Seu nome" className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
+        </Field>
+        <Field label="Idade" icon={<CalendarDays size={16} />}>
+          <input type="number" min="0" max="120" value={age} onChange={(e) => setAge(e.target.value)} placeholder="Sua idade" className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
+        </Field>
+
+        <button
+          type="button"
+          disabled={saving}
+          onClick={handleSave}
+          style={{ background: C.ink, color: C.paper, opacity: saving ? 0.7 : 1 }}
+          className="mt-2 rounded-lg py-2.5 text-sm font-medium hover:opacity-90 transition flex items-center justify-center gap-2"
+        >
+          {saving ? <><Loader2 size={15} className="animate-spin" /> Salvando…</> : "Salvar perfil"}
+        </button>
       </div>
     </div>
   );
