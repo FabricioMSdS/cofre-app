@@ -109,12 +109,21 @@ async function ensureFreshSession(session) {
   }
 }
 
+async function pgErrorMessage(res, fallback) {
+  try {
+    const data = await res.json();
+    return data.message || data.hint || data.error_description || data.error || fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
 async function apiFetchRecords(session, month) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/records?month=eq.${month}&order=date.asc`,
     { headers: authHeaders(session) }
   );
-  if (!res.ok) throw new Error("Erro ao buscar registros.");
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao buscar registros."));
   const rows = await res.json();
   return rows.map((r) => ({ ...r, value: Number(r.value) }));
 }
@@ -125,7 +134,7 @@ async function apiInsertRecord(session, record) {
     headers: authHeaders(session, { Prefer: "return=representation" }),
     body: JSON.stringify({ ...record, user_id: session.user.id }),
   });
-  if (!res.ok) throw new Error("Erro ao salvar registro.");
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao salvar registro."));
   const rows = await res.json();
   return { ...rows[0], value: Number(rows[0].value) };
 }
@@ -136,7 +145,7 @@ async function apiUpdateRecord(session, id, record) {
     headers: authHeaders(session, { Prefer: "return=representation" }),
     body: JSON.stringify(record),
   });
-  if (!res.ok) throw new Error("Erro ao atualizar registro.");
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao atualizar registro."));
   const rows = await res.json();
   return { ...rows[0], value: Number(rows[0].value) };
 }
@@ -146,7 +155,7 @@ async function apiDeleteRecord(session, id) {
     method: "DELETE",
     headers: authHeaders(session),
   });
-  if (!res.ok) throw new Error("Erro ao excluir registro.");
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao excluir registro."));
   return true;
 }
 
@@ -155,7 +164,7 @@ async function apiFetchSettings(session) {
     `${SUPABASE_URL}/rest/v1/settings?user_id=eq.${session.user.id}&select=invest_pct,name,age,avatar_data`,
     { headers: authHeaders(session) }
   );
-  if (!res.ok) throw new Error("Erro ao buscar configurações.");
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao buscar configurações."));
   const rows = await res.json();
   return rows[0] || null;
 }
@@ -166,14 +175,14 @@ async function apiUpsertSettings(session, patch) {
     headers: authHeaders(session, { Prefer: "resolution=merge-duplicates,return=representation" }),
     body: JSON.stringify({ user_id: session.user.id, ...patch }),
   });
-  if (!res.ok) throw new Error("Erro ao salvar configuração.");
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao salvar configuração."));
   const rows = await res.json();
   return rows[0];
 }
 
 async function apiFetchNotes(session) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/notes?order=created_at.desc`, { headers: authHeaders(session) });
-  if (!res.ok) throw new Error("Erro ao buscar anotações.");
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao buscar anotações."));
   return res.json();
 }
 
@@ -183,7 +192,7 @@ async function apiInsertNote(session, note) {
     headers: authHeaders(session, { Prefer: "return=representation" }),
     body: JSON.stringify({ ...note, user_id: session.user.id }),
   });
-  if (!res.ok) throw new Error("Erro ao salvar anotação.");
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao salvar anotação."));
   const rows = await res.json();
   return rows[0];
 }
@@ -194,14 +203,14 @@ async function apiUpdateNote(session, id, patch) {
     headers: authHeaders(session, { Prefer: "return=representation" }),
     body: JSON.stringify(patch),
   });
-  if (!res.ok) throw new Error("Erro ao atualizar anotação.");
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao atualizar anotação."));
   const rows = await res.json();
   return rows[0];
 }
 
 async function apiDeleteNote(session, id) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/notes?id=eq.${id}`, { method: "DELETE", headers: authHeaders(session) });
-  if (!res.ok) throw new Error("Erro ao excluir anotação.");
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao excluir anotação."));
   return true;
 }
 
