@@ -431,7 +431,7 @@ function MainApp({ session, onLogout }) {
             <button onClick={() => setErrorMsg("")}><X size={13} /></button>
           </div>
         )}
-        <main className="flex-1 p-6 md:p-8 overflow-auto">
+        <main className="flex-1 p-6 md:p-8 pb-24 md:pb-8 overflow-auto">
           {view === "overview" ? (
             <Overview totals={totals} investPct={investPct} investCalc={investCalc} onOpenInvestEditor={() => setShowInvestEditor(true)} loading={!settingsLoaded || loadingRecords} />
           ) : (
@@ -439,9 +439,49 @@ function MainApp({ session, onLogout }) {
           )}
         </main>
       </div>
+      <MobileTabBar view={view} setView={setView} onLogout={onLogout} />
       {showInvestEditor && <InvestEditor pct={investPct} onChange={setInvestPct} onClose={() => setShowInvestEditor(false)} />}
       {modalType && <NewRecordModal initialType={modalType} onClose={() => setModalType(null)} onSave={(rec) => { addRecord(rec); setModalType(null); }} />}
     </div>
+  );
+}
+
+/* ------------------------------ mobile tab bar --------------------------------- */
+
+function MobileTabBar({ view, setView, onLogout }) {
+  const items = [
+    { id: "overview", label: "Visão geral", icon: LayoutGrid },
+    { id: "records", label: "Registros", icon: ListChecks },
+  ];
+  return (
+    <nav
+      style={{ background: C.ink, borderColor: "rgba(255,255,255,0.1)" }}
+      className="md:hidden fixed bottom-0 left-0 right-0 border-t flex items-stretch justify-around z-30"
+    >
+      {items.map((it) => {
+        const Icon = it.icon;
+        const active = view === it.id;
+        return (
+          <button
+            key={it.id}
+            onClick={() => setView(it.id)}
+            style={{ color: active ? C.gold : C.paperDeep }}
+            className="flex flex-col items-center justify-center gap-1 flex-1 py-2.5 text-[11px] font-medium"
+          >
+            <Icon size={19} />
+            {it.label}
+          </button>
+        );
+      })}
+      <button
+        onClick={onLogout}
+        style={{ color: C.paperDeep }}
+        className="flex flex-col items-center justify-center gap-1 flex-1 py-2.5 text-[11px] font-medium"
+      >
+        <LogOut size={19} />
+        Sair
+      </button>
+    </nav>
   );
 }
 
