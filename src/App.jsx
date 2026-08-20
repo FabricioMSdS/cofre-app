@@ -172,6 +172,17 @@ async function apiFetchSettings(session) {
   return rows[0] || null;
 }
 
+async function apiFetchTrialDays(session) {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_config?select=trial_days&limit=1`, { headers: authHeaders(session) });
+    if (!res.ok) return TRIAL_DAYS;
+    const rows = await res.json();
+    return rows[0]?.trial_days ?? TRIAL_DAYS;
+  } catch (e) {
+    return TRIAL_DAYS;
+  }
+}
+
 async function apiUpsertSettings(session, patch) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/settings`, {
     method: "POST",
@@ -431,6 +442,7 @@ function MainApp({ session, onLogout }) {
   const [investPct, setInvestPctState] = useState(10);
   const [profile, setProfile] = useState({ name: "", age: "", avatar_data: null });
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [trialDays, setTrialDays] = useState(TRIAL_DAYS);
   const [subscriptionActive, setSubscriptionActive] = useState(false);
   const [notes, setNotes] = useState([]);
   const [notesLoaded, setNotesLoaded] = useState(false);
@@ -454,6 +466,10 @@ function MainApp({ session, onLogout }) {
         }
       } catch (e) { setErrorMsg(e.message); }
       setSettingsLoaded(true);
+    })();
+    (async () => {
+      const days = await apiFetchTrialDays(session);
+      setTrialDays(days);
     })();
     (async () => {
       try {
@@ -544,7 +560,7 @@ function MainApp({ session, onLogout }) {
   const investCalc = Math.round((totals.receita * investPct) / 100);
 
   const createdAt = session.user?.created_at ? new Date(session.user.created_at) : new Date();
-  const trialEndsAt = new Date(createdAt.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
+  const trialEndsAt = new Date(createdAt.getTime() + trialDays * 24 * 60 * 60 * 1000);
   const trialDaysLeft = Math.max(0, Math.ceil((trialEndsAt - new Date()) / (24 * 60 * 60 * 1000)));
   const hasAccess = subscriptionActive || new Date() < trialEndsAt;
 
