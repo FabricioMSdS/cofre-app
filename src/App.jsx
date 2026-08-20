@@ -15,7 +15,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const SESSION_KEY = "supabase-session";
 const TRIAL_DAYS = 1;
 // TODO: troque pelo link de checkout real assim que criar o produto na Kiwify
-const KIWIFY_CHECKOUT_URL = "https://pay.kiwify.com.br/SEU-LINK-AQUI";
+const KIWIFY_CHECKOUT_URL = "https://pay.kiwify.com.br/1Jzzhkx";
 
 function authHeaders(session, extra) {
   return {
