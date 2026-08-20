@@ -13,6 +13,9 @@ import {
 const SUPABASE_URL = "https://ywzncuftzgdfgkecelhk.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl3em5jdWZ0emdkZmdrZWNlbGhrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcwNjA4MTMsImV4cCI6MjEwMjYzNjgxM30.-fEasXY_ikULW80G1ZQkhdO8qJUuz5-GAivxqv2yIF4";
 const SESSION_KEY = "supabase-session";
+const TRIAL_DAYS = 1;
+// TODO: troque pelo link de checkout real assim que criar o produto na Kiwify
+const KIWIFY_CHECKOUT_URL = "https://pay.kiwify.com.br/SEU-LINK-AQUI";
 
 function authHeaders(session, extra) {
   return {
@@ -161,7 +164,7 @@ async function apiDeleteRecord(session, id) {
 
 async function apiFetchSettings(session) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/settings?user_id=eq.${session.user.id}&select=invest_pct,name,age,avatar_data`,
+    `${SUPABASE_URL}/rest/v1/settings?user_id=eq.${session.user.id}&select=invest_pct,name,age,avatar_data,subscription_active`,
     { headers: authHeaders(session) }
   );
   if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao buscar configurações."));
@@ -428,6 +431,7 @@ function MainApp({ session, onLogout }) {
   const [investPct, setInvestPctState] = useState(10);
   const [profile, setProfile] = useState({ name: "", age: "", avatar_data: null });
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [subscriptionActive, setSubscriptionActive] = useState(false);
   const [notes, setNotes] = useState([]);
   const [notesLoaded, setNotesLoaded] = useState(false);
   const [showInvestEditor, setShowInvestEditor] = useState(false);
@@ -446,6 +450,7 @@ function MainApp({ session, onLogout }) {
         } else {
           setInvestPctState(row.invest_pct ?? 10);
           setProfile({ name: row.name || "", age: row.age ?? "", avatar_data: row.avatar_data || null });
+          setSubscriptionActive(!!row.subscription_active);
         }
       } catch (e) { setErrorMsg(e.message); }
       setSettingsLoaded(true);
@@ -538,11 +543,21 @@ function MainApp({ session, onLogout }) {
 
   const investCalc = Math.round((totals.receita * investPct) / 100);
 
+  const createdAt = session.user?.created_at ? new Date(session.user.created_at) : new Date();
+  const trialEndsAt = new Date(createdAt.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
+  const trialDaysLeft = Math.max(0, Math.ceil((trialEndsAt - new Date()) / (24 * 60 * 60 * 1000)));
+  const hasAccess = subscriptionActive || new Date() < trialEndsAt;
+
+  if (settingsLoaded && !hasAccess) {
+    return <Paywall email={session.user?.email} onLogout={onLogout} />;
+  }
+
   return (
     <div style={{ background: C.paper, fontFamily: "Inter, system-ui, sans-serif" }} className="min-h-screen w-full flex">
       <Sidebar view={view} setView={setView} onLogout={onLogout} userEmail={session.user?.email} profile={profile} />
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar
+          trialDaysLeft={!subscriptionActive && settingsLoaded ? trialDaysLeft : null}
           month={month} savedPulse={savedPulse}
           onPrev={() => setMonth(shiftMonth(month, -1))}
           onNext={() => setMonth(shiftMonth(month, 1))}
@@ -684,10 +699,10 @@ function Sidebar({ view, setView, onLogout, userEmail, profile }) {
 
 /* --------------------------------- topbar ------------------------------------- */
 
-function Topbar({ month, onPrev, onNext, onToday, savedPulse }) {
+function Topbar({ month, onPrev, onNext, onToday, savedPulse, trialDaysLeft }) {
   const isCurrent = month === monthKey(new Date());
   return (
-    <header style={{ borderColor: C.line }} className="border-b px-6 md:px-8 py-4 flex items-center justify-between">
+    <header style={{ borderColor: C.line }} className="border-b px-6 md:px-8 py-4 flex items-center justify-between flex-wrap gap-2">
       <div className="flex items-center gap-3">
         <button onClick={onPrev} style={{ borderColor: C.line, color: C.ink }} className="w-8 h-8 rounded-full border flex items-center justify-center hover:bg-black/5"><ChevronLeft size={16} /></button>
         <div className="text-center min-w-[160px]">
@@ -696,10 +711,51 @@ function Topbar({ month, onPrev, onNext, onToday, savedPulse }) {
         </div>
         <button onClick={onNext} style={{ borderColor: C.line, color: C.ink }} className="w-8 h-8 rounded-full border flex items-center justify-center hover:bg-black/5"><ChevronRight size={16} /></button>
       </div>
-      <div style={{ background: savedPulse ? C.emeraldSoft : C.paperDeep, color: savedPulse ? C.emerald : C.inkSoft }} className="text-xs px-3 py-1.5 rounded-full font-medium hidden sm:flex items-center gap-1.5 transition-colors">
-        {savedPulse ? <Check size={12} /> : null}{savedPulse ? "Salvo" : "Conectado ao Supabase"}
+      <div className="flex items-center gap-2">
+        {trialDaysLeft !== null && trialDaysLeft !== undefined && (
+          <a
+            href={KIWIFY_CHECKOUT_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ background: C.goldSoft, color: C.gold }}
+            className="text-xs px-3 py-1.5 rounded-full font-medium"
+          >
+            {trialDaysLeft === 0 ? "Teste acaba hoje — assinar" : `${trialDaysLeft} dia${trialDaysLeft === 1 ? "" : "s"} de teste — assinar`}
+          </a>
+        )}
+        <div style={{ background: savedPulse ? C.emeraldSoft : C.paperDeep, color: savedPulse ? C.emerald : C.inkSoft }} className="text-xs px-3 py-1.5 rounded-full font-medium hidden sm:flex items-center gap-1.5 transition-colors">
+          {savedPulse ? <Check size={12} /> : null}{savedPulse ? "Salvo" : "Conectado ao Supabase"}
+        </div>
       </div>
     </header>
+  );
+}
+
+/* --------------------------------- paywall ------------------------------------- */
+
+function Paywall({ email, onLogout }) {
+  const checkoutUrl = `${KIWIFY_CHECKOUT_URL}${KIWIFY_CHECKOUT_URL.includes("?") ? "&" : "?"}email=${encodeURIComponent(email || "")}`;
+  return (
+    <div style={{ background: C.ink, fontFamily: "Inter, system-ui, sans-serif" }} className="min-h-screen w-full flex items-center justify-center p-6">
+      <div style={{ background: C.card }} className="w-full max-w-md rounded-2xl p-8 text-center">
+        <div style={{ background: C.gold }} className="w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-5"><Wallet size={22} color={C.ink} /></div>
+        <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-2xl mb-2">Seu teste grátis acabou</p>
+        <p style={{ color: C.inkSoft }} className="text-sm mb-6 leading-relaxed">
+          Assine o Cofre para continuar registrando suas receitas e despesas e manter o controle do seu mês.
+          Use o mesmo e-mail (<strong>{email}</strong>) no pagamento para liberarmos o acesso automaticamente.
+        </p>
+        <a
+          href={checkoutUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ background: C.ink, color: C.paper }}
+          className="w-full inline-flex items-center justify-center gap-2 rounded-lg py-3 text-sm font-medium hover:opacity-90 transition mb-3"
+        >
+          Assinar agora <ArrowRight size={15} />
+        </a>
+        <button onClick={onLogout} style={{ color: C.inkSoft }} className="text-xs underline underline-offset-2">Sair da conta</button>
+      </div>
+    </div>
   );
 }
 
