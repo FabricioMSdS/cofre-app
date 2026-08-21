@@ -6,6 +6,7 @@ import {
   Wallet, TrendingDown, PiggyBank, Settings2, LogOut, LayoutGrid, ListChecks,
   Plus, X, ChevronLeft, ChevronRight, Lock, Mail, User, ArrowRight, Check, Loader2,
   StickyNote, Trash2, Camera, CircleX, CheckCircle2, Circle, UserRound, CalendarDays,
+  Eye, EyeOff, Pencil, RefreshCw,
 } from "lucide-react";
 
 /* ------------------------------- supabase config ----------------------------- */
@@ -75,6 +76,30 @@ async function apiSignOut(session) {
       headers: authHeaders(session),
     });
   } catch (e) { /* noop */ }
+}
+
+async function apiRequestPasswordReset(email) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify({ email, redirect_to: window.location.origin + window.location.pathname }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(translateAuthError(data.msg || data.error_description || data.error));
+  }
+  return true;
+}
+
+async function apiUpdatePassword(accessToken, password) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ password }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(translateAuthError(data.msg || data.error_description || data.error));
+  return data;
 }
 
 function toSession(tokenData) {
@@ -162,6 +187,53 @@ async function apiDeleteRecord(session, id) {
   return true;
 }
 
+function shiftDateToMonth(dateStr, targetMonthKey) {
+  const day = Number(dateStr.split("-")[2]);
+  const [y, m] = targetMonthKey.split("-").map(Number);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const clampedDay = Math.min(day, daysInMonth);
+  return `${targetMonthKey}-${String(clampedDay).padStart(2, "0")}`;
+}
+
+// Repete automaticamente para o mês visualizado qualquer receita/despesa fixa
+// que já existia (e ainda está ativa) no mês anterior. Roda sempre que o
+// usuário navega para um novo mês — por isso funciona mesmo sem um servidor
+// rodando tarefas agendadas.
+async function apiCarryForwardRecurring(session, targetMonthKey) {
+  const prevMonthKey = shiftMonth(targetMonthKey, -1);
+  let prevRows = [];
+  let targetRows = [];
+  try {
+    [prevRows, targetRows] = await Promise.all([
+      apiFetchRecords(session, prevMonthKey),
+      apiFetchRecords(session, targetMonthKey),
+    ]);
+  } catch (e) {
+    return false;
+  }
+
+  const existingGroups = new Set(targetRows.filter((r) => r.recurring_group).map((r) => r.recurring_group));
+  const toCreate = prevRows.filter((r) => r.recurring_group && r.recurring_active && !existingGroups.has(r.recurring_group));
+
+  for (const r of toCreate) {
+    try {
+      await apiInsertRecord(session, {
+        type: r.type,
+        month: targetMonthKey,
+        date: shiftDateToMonth(r.date, targetMonthKey),
+        description: r.description,
+        value: r.value,
+        category: r.category,
+        recurring_group: r.recurring_group,
+        recurring_active: true,
+      });
+    } catch (e) {
+      // se uma falhar, segue tentando as demais
+    }
+  }
+  return toCreate.length > 0;
+}
+
 async function apiFetchSettings(session) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/settings?user_id=eq.${session.user.id}&select=invest_pct,name,age,avatar_data,subscription_active`,
@@ -240,7 +312,8 @@ const C = {
 const PIE_PALETTE = ["#1F6F54", "#B3492F", "#B8842E", "#4B7B8C", "#7A5C8E", "#C97B3D", "#5C7A4E"];
 
 const CATEGORY_OPTIONS = {
-  receita: ["Salário", "Freelance", "Rendimentos", "Outros"],
+  receita: ["Salário", "Rendimentos", "Outros"],
+  receita_variavel: ["Freelance", "Venda avulsa", "Bônus/13º", "Rendimentos", "Outros"],
   despesa_fixa: ["Moradia", "Contas e assinaturas", "Transporte", "Educação", "Saúde", "Outros"],
   despesa_variavel: ["Alimentação", "Lazer", "Compras", "Transporte", "Saúde", "Outros"],
   sobra: ["Reserva do mês"],
@@ -248,7 +321,8 @@ const CATEGORY_OPTIONS = {
 };
 
 const TYPE_META = {
-  receita: { label: "Receita", dateLabel: "Data de recebimento (repete todo mês)", color: C.emerald },
+  receita: { label: "Receita fixa", dateLabel: "Data de recebimento (repete todo mês)", color: C.emerald },
+  receita_variavel: { label: "Receita variável", dateLabel: "Data do recebimento", color: "#4E9C7C" },
   despesa_fixa: { label: "Despesa fixa", dateLabel: "Dia de vencimento (repete todo mês)", color: C.rust },
   despesa_variavel: { label: "Despesa variável", dateLabel: "Data do gasto", color: C.amber },
   sobra: { label: "Sobra", dateLabel: "Data de referência", color: C.gold },
@@ -256,10 +330,12 @@ const TYPE_META = {
 };
 
 const TABS = [
-  { id: "receitas", label: "Receitas", types: ["receita"] },
+  { id: "receitas", label: "Receitas", types: ["receita", "receita_variavel"] },
   { id: "despesas", label: "Despesas", types: ["despesa_fixa", "despesa_variavel"] },
   { id: "sobra_invest", label: "Sobra & investimento", types: ["sobra", "investimento"] },
 ];
+
+const FIXED_TYPES = ["receita", "despesa_fixa"];
 
 /* --------------------------------- helpers ---------------------------------- */
 
@@ -278,14 +354,22 @@ function currency(v) { return (v || 0).toLocaleString("pt-BR", { style: "currenc
 /* ---------------------------------- shell ----------------------------------- */
 
 export default function App() {
-  const [phase, setPhase] = useState("boot"); // boot | login | signup | app
+  const [phase, setPhase] = useState("boot"); // boot | login | signup | reset-password | app
   const [session, setSession] = useState(null);
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
+  const [recoveryToken, setRecoveryToken] = useState(null);
 
   useEffect(() => {
     let mounted = true;
     (async () => {
+      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+      if (hashParams.get("type") === "recovery" && hashParams.get("access_token")) {
+        setRecoveryToken(hashParams.get("access_token"));
+        window.history.replaceState(null, "", window.location.pathname);
+        setPhase("reset-password");
+        return;
+      }
       const stored = await loadStoredSession();
       const fresh = await ensureFreshSession(stored);
       if (!mounted) return;
@@ -326,6 +410,27 @@ export default function App() {
     }
   }
 
+  async function handleForgotPassword(email) {
+    try {
+      await apiRequestPasswordReset(email);
+    } catch (e) {
+      // não expõe se o e-mail existe ou não, mas registra erros reais de rede
+      console.log(e.message);
+    }
+  }
+
+  async function handleResetPassword(newPassword) {
+    setAuthError("");
+    try {
+      await apiUpdatePassword(recoveryToken, newPassword);
+      setRecoveryToken(null);
+      setAuthNotice("Senha atualizada! Faça login com a nova senha.");
+      setPhase("login");
+    } catch (e) {
+      setAuthError(e.message);
+    }
+  }
+
   async function handleLogout() {
     if (session) await apiSignOut(session);
     await clearStoredSession();
@@ -340,6 +445,9 @@ export default function App() {
       </div>
     );
   }
+  if (phase === "reset-password") {
+    return <ResetPasswordScreen onSubmit={handleResetPassword} error={authError} />;
+  }
   if (phase === "login" || phase === "signup") {
     return (
       <AuthScreen
@@ -348,6 +456,7 @@ export default function App() {
         notice={authNotice}
         onSwitch={() => { setAuthError(""); setAuthNotice(""); setPhase(phase === "login" ? "signup" : "login"); }}
         onSubmit={phase === "login" ? handleLogin : handleSignup}
+        onForgotPassword={handleForgotPassword}
       />
     );
   }
@@ -356,17 +465,34 @@ export default function App() {
 
 /* ------------------------------- auth screens -------------------------------- */
 
-function AuthScreen({ mode, onSwitch, onSubmit, error, notice }) {
+function AuthScreen({ mode, onSwitch, onSubmit, onForgotPassword, error, notice }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showForgot, setShowForgot] = useState(false);
+  const [forgotSent, setForgotSent] = useState(false);
+  const [localError, setLocalError] = useState("");
   const isLogin = mode === "login";
 
   async function handleSubmit() {
     if (busy) return;
+    setLocalError("");
+    if (!isLogin && password !== confirmPassword) {
+      setLocalError("As senhas não coincidem.");
+      return;
+    }
     setBusy(true);
     await onSubmit(email, password);
     setBusy(false);
+  }
+
+  async function handleForgot() {
+    if (busy || !email) return;
+    setBusy(true);
+    await onForgotPassword(email);
+    setBusy(false);
+    setForgotSent(true);
   }
 
   return (
@@ -392,28 +518,62 @@ function AuthScreen({ mode, onSwitch, onSubmit, error, notice }) {
             <span style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-lg">Cofre</span>
           </div>
 
-          <h2 style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-2xl mb-1">{isLogin ? "Entrar na sua conta" : "Criar sua conta"}</h2>
-          <p style={{ color: C.inkSoft }} className="text-sm mb-6">{isLogin ? "Continue de onde parou o controle do seu mês." : "Leva menos de um minuto para começar."}</p>
+          {showForgot ? (
+            <>
+              <h2 style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-2xl mb-1">Redefinir senha</h2>
+              <p style={{ color: C.inkSoft }} className="text-sm mb-6">Informe seu e-mail e enviaremos um link para você criar uma nova senha.</p>
 
-          {error && <div style={{ background: C.rustSoft, color: C.rust }} className="text-xs rounded-lg px-3 py-2 mb-4">{error}</div>}
-          {notice && <div style={{ background: C.emeraldSoft, color: C.emerald }} className="text-xs rounded-lg px-3 py-2 mb-4">{notice}</div>}
+              {forgotSent ? (
+                <div style={{ background: C.emeraldSoft, color: C.emerald }} className="text-sm rounded-lg px-3 py-3 mb-4">
+                  Se esse e-mail estiver cadastrado, você vai receber um link em instantes. Confira também a caixa de spam.
+                </div>
+              ) : (
+                <div className="flex flex-col gap-4">
+                  <Field label="E-mail" icon={<Mail size={16} />}>
+                    <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleForgot()} placeholder="voce@email.com" className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
+                  </Field>
+                  <button type="button" onClick={handleForgot} disabled={busy} style={{ background: C.ink, color: C.paper, opacity: busy ? 0.7 : 1 }} className="rounded-lg py-2.5 text-sm font-medium flex items-center justify-center gap-2 hover:opacity-90 transition">
+                    {busy ? <><Loader2 size={15} className="animate-spin" /> Enviando…</> : "Enviar link de redefinição"}
+                  </button>
+                </div>
+              )}
 
-          <div className="flex flex-col gap-4">
-            <Field label="E-mail" icon={<Mail size={16} />}>
-              <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} placeholder="voce@email.com" className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
-            </Field>
-            <Field label="Senha" icon={<Lock size={16} />}>
-              <input type="password" required minLength={6} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} placeholder="mínimo 6 caracteres" className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
-            </Field>
-            <button type="button" onClick={handleSubmit} disabled={busy} style={{ background: C.ink, color: C.paper, opacity: busy ? 0.7 : 1 }} className="mt-2 rounded-lg py-2.5 text-sm font-medium flex items-center justify-center gap-2 hover:opacity-90 transition">
-              {busy ? <><Loader2 size={15} className="animate-spin" /> Só um instante…</> : <>{isLogin ? "Entrar" : "Criar conta"} <ArrowRight size={15} /></>}
-            </button>
-          </div>
+              <button onClick={() => { setShowForgot(false); setForgotSent(false); }} style={{ color: C.emerald }} className="text-xs mt-5 text-center font-medium underline underline-offset-2 mx-auto block">
+                Voltar para o login
+              </button>
+            </>
+          ) : (
+            <>
+              <h2 style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-2xl mb-1">{isLogin ? "Entrar na sua conta" : "Criar sua conta"}</h2>
+              <p style={{ color: C.inkSoft }} className="text-sm mb-6">{isLogin ? "Continue de onde parou o controle do seu mês." : "Leva menos de um minuto para começar."}</p>
 
-          <p style={{ color: C.inkSoft }} className="text-xs mt-5 text-center">
-            {isLogin ? "Ainda não tem conta?" : "Já tem uma conta?"}{" "}
-            <button onClick={onSwitch} style={{ color: C.emerald }} className="font-medium underline underline-offset-2">{isLogin ? "Cadastre-se" : "Entrar"}</button>
-          </p>
+              {(error || localError) && <div style={{ background: C.rustSoft, color: C.rust }} className="text-xs rounded-lg px-3 py-2 mb-4">{error || localError}</div>}
+              {notice && <div style={{ background: C.emeraldSoft, color: C.emerald }} className="text-xs rounded-lg px-3 py-2 mb-4">{notice}</div>}
+
+              <div className="flex flex-col gap-4">
+                <Field label="E-mail" icon={<Mail size={16} />}>
+                  <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} placeholder="voce@email.com" className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
+                </Field>
+                <PasswordField label="Senha" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} placeholder="mínimo 6 caracteres" minLength={6} autoComplete={isLogin ? "current-password" : "new-password"} />
+                {!isLogin && (
+                  <PasswordField label="Confirmar senha" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} placeholder="digite a senha novamente" minLength={6} autoComplete="new-password" />
+                )}
+                {isLogin && (
+                  <button type="button" onClick={() => setShowForgot(true)} style={{ color: C.emerald }} className="text-xs font-medium underline underline-offset-2 text-left -mt-1">
+                    Esqueci minha senha
+                  </button>
+                )}
+                <button type="button" onClick={handleSubmit} disabled={busy} style={{ background: C.ink, color: C.paper, opacity: busy ? 0.7 : 1 }} className="mt-1 rounded-lg py-2.5 text-sm font-medium flex items-center justify-center gap-2 hover:opacity-90 transition">
+                  {busy ? <><Loader2 size={15} className="animate-spin" /> Só um instante…</> : <>{isLogin ? "Entrar" : "Criar conta"} <ArrowRight size={15} /></>}
+                </button>
+              </div>
+
+              <p style={{ color: C.inkSoft }} className="text-xs mt-5 text-center">
+                {isLogin ? "Ainda não tem conta?" : "Já tem uma conta?"}{" "}
+                <button onClick={onSwitch} style={{ color: C.emerald }} className="font-medium underline underline-offset-2">{isLogin ? "Cadastre-se" : "Entrar"}</button>
+              </p>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -429,6 +589,71 @@ function Field({ label, icon, children }) {
         {children}
       </div>
     </label>
+  );
+}
+
+function PasswordField({ label, value, onChange, onKeyDown, placeholder, minLength, autoComplete }) {
+  const [show, setShow] = useState(false);
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span style={{ color: C.inkSoft }} className="text-xs font-medium uppercase tracking-wide">{label}</span>
+      <div style={{ borderColor: C.line, background: C.paper }} className="flex items-center gap-2 rounded-lg border px-3 py-2.5">
+        <Lock size={16} style={{ color: C.inkSoft }} />
+        <input
+          type={show ? "text" : "password"}
+          required
+          minLength={minLength}
+          value={value}
+          onChange={onChange}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          autoComplete={autoComplete}
+          className="flex-1 min-w-0 bg-transparent outline-none text-sm"
+          style={{ color: C.ink }}
+        />
+        <button type="button" onClick={() => setShow((s) => !s)} style={{ color: C.inkSoft }} className="shrink-0" tabIndex={-1}>
+          {show ? <EyeOff size={16} /> : <Eye size={16} />}
+        </button>
+      </div>
+    </label>
+  );
+}
+
+function ResetPasswordScreen({ onSubmit, error }) {
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [localError, setLocalError] = useState("");
+
+  async function handleSubmit() {
+    if (busy) return;
+    setLocalError("");
+    if (password !== confirmPassword) {
+      setLocalError("As senhas não coincidem.");
+      return;
+    }
+    setBusy(true);
+    await onSubmit(password);
+    setBusy(false);
+  }
+
+  return (
+    <div style={{ background: C.ink, fontFamily: "Inter, system-ui, sans-serif" }} className="min-h-screen w-full flex items-center justify-center p-6">
+      <div style={{ background: C.card }} className="w-full max-w-sm rounded-2xl p-8">
+        <h2 style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-2xl mb-1">Criar nova senha</h2>
+        <p style={{ color: C.inkSoft }} className="text-sm mb-6">Escolha uma nova senha para sua conta.</p>
+
+        {(error || localError) && <div style={{ background: C.rustSoft, color: C.rust }} className="text-xs rounded-lg px-3 py-2 mb-4">{error || localError}</div>}
+
+        <div className="flex flex-col gap-4">
+          <PasswordField label="Nova senha" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} placeholder="mínimo 6 caracteres" minLength={6} autoComplete="new-password" />
+          <PasswordField label="Confirmar nova senha" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} placeholder="digite a senha novamente" minLength={6} autoComplete="new-password" />
+          <button type="button" onClick={handleSubmit} disabled={busy} style={{ background: C.ink, color: C.paper, opacity: busy ? 0.7 : 1 }} className="mt-1 rounded-lg py-2.5 text-sm font-medium flex items-center justify-center gap-2 hover:opacity-90 transition">
+            {busy ? <><Loader2 size={15} className="animate-spin" /> Salvando…</> : "Salvar nova senha"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -483,9 +708,15 @@ function MainApp({ session, onLogout }) {
   useEffect(() => {
     let active = true;
     setLoadingRecords(true);
-    apiFetchRecords(session, month)
-      .then((rows) => { if (active) { setRecordsByMonth((p) => ({ ...p, [month]: rows })); setLoadingRecords(false); } })
-      .catch((e) => { if (active) { setErrorMsg(e.message); setLoadingRecords(false); } });
+    (async () => {
+      try {
+        await apiCarryForwardRecurring(session, month);
+        const rows = await apiFetchRecords(session, month);
+        if (active) { setRecordsByMonth((p) => ({ ...p, [month]: rows })); setLoadingRecords(false); }
+      } catch (e) {
+        if (active) { setErrorMsg(e.message); setLoadingRecords(false); }
+      }
+    })();
     return () => { active = false; };
   }, [month]);
 
@@ -499,7 +730,11 @@ function MainApp({ session, onLogout }) {
 
   async function addRecord(rec) {
     try {
-      const saved = await apiInsertRecord(session, { ...rec, month });
+      const isFixed = FIXED_TYPES.includes(rec.type);
+      const payload = isFixed
+        ? { ...rec, month, recurring_group: crypto.randomUUID(), recurring_active: true }
+        : { ...rec, month };
+      const saved = await apiInsertRecord(session, payload);
       setRecordsByMonth((p) => ({ ...p, [month]: [...(p[month] || []), saved] }));
       pulse();
     } catch (e) { setErrorMsg(e.message); }
@@ -543,6 +778,14 @@ function MainApp({ session, onLogout }) {
   async function toggleNote(id, completed) {
     setNotes((p) => p.map((n) => (n.id === id ? { ...n, completed } : n)));
     try { await apiUpdateNote(session, id, { completed }); } catch (e) { setErrorMsg(e.message); }
+  }
+
+  async function editNote(id, patch) {
+    try {
+      const saved = await apiUpdateNote(session, id, patch);
+      setNotes((p) => p.map((n) => (n.id === id ? saved : n)));
+      pulse();
+    } catch (e) { setErrorMsg(e.message); }
   }
 
   async function deleteNote(id) {
@@ -601,7 +844,7 @@ function MainApp({ session, onLogout }) {
             />
           )}
           {view === "notes" && (
-            <NotesView notes={notes} loaded={notesLoaded} onAdd={addNote} onToggle={toggleNote} onDelete={deleteNote} />
+            <NotesView notes={notes} loaded={notesLoaded} onAdd={addNote} onEdit={editNote} onToggle={toggleNote} onDelete={deleteNote} />
           )}
           {view === "profile" && (
             <ProfileView profile={profile} email={session.user?.email} onSave={saveProfile} loaded={settingsLoaded} />
@@ -618,6 +861,7 @@ function MainApp({ session, onLogout }) {
           onClose={() => setEditingRecord(null)}
           onSave={(rec) => { updateRecord(editingRecord.id, rec); setEditingRecord(null); }}
           onDelete={() => { deleteRecord(editingRecord.id); setEditingRecord(null); }}
+          onStopRecurring={() => { updateRecord(editingRecord.id, { recurring_active: false }); setEditingRecord(null); }}
         />
       )}
     </div>
@@ -968,7 +1212,7 @@ function Records({ records, loading, onNewRecord, onEditRecord, totals, investPc
 
 /* ------------------------------- new record modal ------------------------------ */
 
-function NewRecordModal({ initialType, existingRecord, onClose, onSave, onDelete }) {
+function NewRecordModal({ initialType, existingRecord, onClose, onSave, onDelete, onStopRecurring }) {
   const isEdit = !!existingRecord;
   const [type, setType] = useState(initialType);
   const [date, setDate] = useState(existingRecord?.date || "");
@@ -977,21 +1221,30 @@ function NewRecordModal({ initialType, existingRecord, onClose, onSave, onDelete
   const [category, setCategory] = useState(existingRecord?.category || CATEGORY_OPTIONS[initialType][0]);
   const [saving, setSaving] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingStop, setConfirmingStop] = useState(false);
 
-  function handleTypeChange(t) { setType(t); setCategory(CATEGORY_OPTIONS[t][0]); }
+  function handleTypeChange(t) { if (isEdit) return; setType(t); setCategory(CATEGORY_OPTIONS[t][0]); }
   const meta = TYPE_META[type];
+  const isRecurring = !!existingRecord?.recurring_group;
+  const recurringActive = existingRecord?.recurring_active !== false;
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center p-4" style={{ background: "rgba(19,32,25,0.45)" }}>
       <div style={{ background: C.card }} className="w-full max-w-lg rounded-xl p-6 relative max-h-[90vh] overflow-auto">
         <button onClick={onClose} style={{ color: C.inkSoft }} className="absolute top-4 right-4 hover:text-black"><X size={18} /></button>
-        <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-lg mb-5">{isEdit ? "Editar registro" : "Novo registro"}</p>
+        <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-lg mb-1">{isEdit ? "Editar registro" : "Novo registro"}</p>
+        {isRecurring && (
+          <p style={{ color: recurringActive ? C.emerald : C.inkSoft }} className="text-xs font-medium mb-4 flex items-center gap-1.5">
+            <RefreshCw size={12} /> {recurringActive ? "Item fixo — repete todo mês automaticamente" : "Recorrência encerrada — não repete mais"}
+          </p>
+        )}
+        {!isRecurring && <div className="mb-5" />}
 
         <p style={{ color: C.inkSoft }} className="text-xs uppercase tracking-wide font-medium mb-2">Tipo de registro</p>
         <div className="grid grid-cols-2 gap-2 mb-5">
           {Object.entries(TYPE_META).map(([key, m]) => (
-            <button key={key} onClick={() => handleTypeChange(key)}
-              style={{ borderColor: type === key ? m.color : C.line, background: type === key ? m.color + "1A" : "transparent", color: type === key ? m.color : C.inkSoft }}
+            <button key={key} onClick={() => handleTypeChange(key)} disabled={isEdit}
+              style={{ borderColor: type === key ? m.color : C.line, background: type === key ? m.color + "1A" : "transparent", color: type === key ? m.color : C.inkSoft, opacity: isEdit && type !== key ? 0.5 : 1, cursor: isEdit ? "default" : "pointer" }}
               className="border rounded-lg px-3 py-2 text-xs font-medium text-left transition">
               {m.label}
             </button>
@@ -1032,6 +1285,25 @@ function NewRecordModal({ initialType, existingRecord, onClose, onSave, onDelete
           >
             {saving ? <><Loader2 size={15} className="animate-spin" /> Salvando…</> : isEdit ? "Salvar alterações" : "Salvar registro"}
           </button>
+          <p style={{ color: C.inkSoft }} className="text-xs -mt-2">Isso altera só o registro deste mês — meses futuros ainda não gerados vão herdar essa alteração.</p>
+
+          {isEdit && isRecurring && recurringActive && (
+            <div>
+              {!confirmingStop ? (
+                <button type="button" onClick={() => setConfirmingStop(true)} style={{ color: C.gold }} className="text-xs font-medium hover:underline flex items-center gap-1.5">
+                  <RefreshCw size={12} /> Encerrar recorrência (não repetir mais)
+                </button>
+              ) : (
+                <div style={{ background: C.goldSoft }} className="rounded-lg p-3 flex items-center justify-between gap-3 flex-wrap">
+                  <span style={{ color: C.gold }} className="text-xs">Este mês continua salvo, mas deixa de se repetir nos próximos. Confirma?</span>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => setConfirmingStop(false)} style={{ color: C.inkSoft }} className="text-xs px-2 py-1">Cancelar</button>
+                    <button type="button" onClick={onStopRecurring} style={{ background: C.gold, color: "#fff" }} className="text-xs px-3 py-1.5 rounded-md font-medium">Encerrar</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {isEdit && (
             <div style={{ borderColor: C.line }} className="border-t pt-4 mt-1">
@@ -1046,7 +1318,9 @@ function NewRecordModal({ initialType, existingRecord, onClose, onSave, onDelete
                 </button>
               ) : (
                 <div style={{ background: C.rustSoft }} className="rounded-lg p-3 flex items-center justify-between gap-3 flex-wrap">
-                  <span style={{ color: C.rust }} className="text-xs">Tem certeza? Essa ação não pode ser desfeita.</span>
+                  <span style={{ color: C.rust }} className="text-xs">
+                    {isRecurring ? "Isso apaga só o registro deste mês (não afeta os outros meses)." : "Tem certeza? Essa ação não pode ser desfeita."}
+                  </span>
                   <div className="flex gap-2">
                     <button type="button" onClick={() => setConfirmingDelete(false)} style={{ color: C.inkSoft }} className="text-xs px-2 py-1">Cancelar</button>
                     <button type="button" onClick={onDelete} style={{ background: C.rust, color: "#fff" }} className="text-xs px-3 py-1.5 rounded-md font-medium">Excluir</button>
@@ -1069,21 +1343,36 @@ function isOverdue(note) {
   return new Date(note.due_date + "T00:00:00") < today;
 }
 
-function NotesView({ notes, loaded, onAdd, onToggle, onDelete }) {
-  const [showForm, setShowForm] = useState(false);
+function NotesView({ notes, loaded, onAdd, onEdit, onToggle, onDelete }) {
+  const [formMode, setFormMode] = useState(null); // null | "new" | note object sendo editado
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [saving, setSaving] = useState(false);
 
   const pending = notes.filter((n) => !n.completed);
   const done = notes.filter((n) => n.completed);
+  const isEditing = formMode && formMode !== "new";
 
-  async function handleAdd() {
+  function openNew() {
+    setTitle(""); setDueDate(""); setFormMode("new");
+  }
+  function openEdit(note) {
+    setTitle(note.title); setDueDate(note.due_date || ""); setFormMode(note);
+  }
+  function closeForm() {
+    setFormMode(null);
+  }
+
+  async function handleSave() {
     if (!title.trim()) return;
     setSaving(true);
-    await onAdd({ title: title.trim(), due_date: dueDate || null, completed: false });
-    setTitle(""); setDueDate(""); setShowForm(false);
+    if (isEditing) {
+      await onEdit(formMode.id, { title: title.trim(), due_date: dueDate || null });
+    } else {
+      await onAdd({ title: title.trim(), due_date: dueDate || null, completed: false });
+    }
     setSaving(false);
+    closeForm();
   }
 
   return (
@@ -1093,13 +1382,14 @@ function NotesView({ notes, loaded, onAdd, onToggle, onDelete }) {
           <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-xl">Anotações & metas</p>
           <p style={{ color: C.inkSoft }} className="text-sm mt-0.5">Marque como concluído quando terminar. Prazos vencidos aparecem com um X.</p>
         </div>
-        <button onClick={() => setShowForm((s) => !s)} style={{ background: C.ink, color: C.paper }} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-90 transition shrink-0">
+        <button onClick={openNew} style={{ background: C.ink, color: C.paper }} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-90 transition shrink-0">
           <Plus size={16} /> Nova
         </button>
       </div>
 
-      {showForm && (
+      {formMode && (
         <div style={{ background: C.card, borderColor: C.line }} className="rounded-xl border p-4 mb-5 flex flex-col gap-3">
+          <p style={{ color: C.inkSoft }} className="text-xs uppercase tracking-wide font-medium">{isEditing ? "Editar anotação" : "Nova anotação"}</p>
           <Field label="Título da meta ou anotação" icon={<StickyNote size={15} />}>
             <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex: Juntar reserva de emergência" className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
           </Field>
@@ -1107,8 +1397,8 @@ function NotesView({ notes, loaded, onAdd, onToggle, onDelete }) {
             <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
           </Field>
           <div className="flex gap-2">
-            <button type="button" onClick={() => setShowForm(false)} style={{ color: C.inkSoft, borderColor: C.line }} className="flex-1 border rounded-lg py-2 text-sm">Cancelar</button>
-            <button type="button" disabled={saving} onClick={handleAdd} style={{ background: C.ink, color: C.paper, opacity: saving ? 0.7 : 1 }} className="flex-1 rounded-lg py-2 text-sm font-medium flex items-center justify-center gap-2">
+            <button type="button" onClick={closeForm} style={{ color: C.inkSoft, borderColor: C.line }} className="flex-1 border rounded-lg py-2 text-sm">Cancelar</button>
+            <button type="button" disabled={saving} onClick={handleSave} style={{ background: C.ink, color: C.paper, opacity: saving ? 0.7 : 1 }} className="flex-1 rounded-lg py-2 text-sm font-medium flex items-center justify-center gap-2">
               {saving ? <Loader2 size={15} className="animate-spin" /> : "Salvar"}
             </button>
           </div>
@@ -1133,7 +1423,7 @@ function NotesView({ notes, loaded, onAdd, onToggle, onDelete }) {
                 >
                   {n.completed ? <CheckCircle2 size={22} /> : overdue ? <CircleX size={22} /> : <Circle size={22} />}
                 </button>
-                <div className="min-w-0 flex-1">
+                <button onClick={() => openEdit(n)} className="min-w-0 flex-1 text-left">
                   <p style={{ color: n.completed ? C.inkSoft : C.ink, textDecoration: n.completed ? "line-through" : "none" }} className="text-sm font-medium truncate">
                     {n.title}
                   </p>
@@ -1142,8 +1432,11 @@ function NotesView({ notes, loaded, onAdd, onToggle, onDelete }) {
                       {overdue ? "Venceu em " : "Prazo: "}{n.due_date.split("-").reverse().join("/")}
                     </p>
                   )}
-                </div>
-                <button onClick={() => onDelete(n.id)} style={{ color: C.inkSoft }} className="shrink-0 hover:text-black transition">
+                </button>
+                <button onClick={() => openEdit(n)} style={{ color: C.inkSoft }} className="shrink-0 hover:text-black transition" title="Editar">
+                  <Pencil size={15} />
+                </button>
+                <button onClick={() => onDelete(n.id)} style={{ color: C.inkSoft }} className="shrink-0 hover:text-black transition" title="Excluir">
                   <Trash2 size={16} />
                 </button>
               </div>
