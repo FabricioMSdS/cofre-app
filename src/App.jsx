@@ -187,6 +187,17 @@ async function apiDeleteRecord(session, id) {
   return true;
 }
 
+// Apaga as instâncias já geradas nos meses seguintes ao mês informado (comparação
+// funciona porque o "month" é sempre "YYYY-MM", então a ordem alfabética = ordem cronológica).
+async function apiDeleteFutureRecurring(session, recurringGroup, afterMonthKey) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/records?recurring_group=eq.${encodeURIComponent(recurringGroup)}&month=gt.${afterMonthKey}`,
+    { method: "DELETE", headers: authHeaders(session) }
+  );
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao remover os meses futuros."));
+  return true;
+}
+
 function shiftDateToMonth(dateStr, targetMonthKey) {
   const day = Number(dateStr.split("-")[2]);
   const [y, m] = targetMonthKey.split("-").map(Number);
@@ -756,6 +767,24 @@ function MainApp({ session, onLogout }) {
     } catch (e) { setErrorMsg(e.message); }
   }
 
+  async function stopRecurring(record) {
+    try {
+      await apiDeleteFutureRecurring(session, record.recurring_group, record.month);
+      const saved = await apiUpdateRecord(session, record.id, { recurring_active: false });
+      setRecordsByMonth((p) => {
+        const next = { ...p, [month]: (p[month] || []).map((r) => (r.id === record.id ? saved : r)) };
+        // limpa dos meses já carregados em memória que ficaram à frente deste
+        for (const key of Object.keys(next)) {
+          if (key > record.month) {
+            next[key] = next[key].filter((r) => r.recurring_group !== record.recurring_group);
+          }
+        }
+        return next;
+      });
+      pulse();
+    } catch (e) { setErrorMsg(e.message); }
+  }
+
   async function setInvestPct(pct) {
     setInvestPctState(pct);
     try { await apiUpsertSettings(session, { invest_pct: pct }); pulse(); } catch (e) { setErrorMsg(e.message); }
@@ -861,7 +890,7 @@ function MainApp({ session, onLogout }) {
           onClose={() => setEditingRecord(null)}
           onSave={(rec) => { updateRecord(editingRecord.id, rec); setEditingRecord(null); }}
           onDelete={() => { deleteRecord(editingRecord.id); setEditingRecord(null); }}
-          onStopRecurring={() => { updateRecord(editingRecord.id, { recurring_active: false }); setEditingRecord(null); }}
+          onStopRecurring={() => { stopRecurring(editingRecord); setEditingRecord(null); }}
         />
       )}
     </div>
@@ -1295,7 +1324,7 @@ function NewRecordModal({ initialType, existingRecord, onClose, onSave, onDelete
                 </button>
               ) : (
                 <div style={{ background: C.goldSoft }} className="rounded-lg p-3 flex items-center justify-between gap-3 flex-wrap">
-                  <span style={{ color: C.gold }} className="text-xs">Este mês continua salvo, mas deixa de se repetir nos próximos. Confirma?</span>
+                  <span style={{ color: C.gold }} className="text-xs">Este mês continua salvo, mas os meses futuros que já foram gerados a partir dele serão apagados. Confirma?</span>
                   <div className="flex gap-2">
                     <button type="button" onClick={() => setConfirmingStop(false)} style={{ color: C.inkSoft }} className="text-xs px-2 py-1">Cancelar</button>
                     <button type="button" onClick={onStopRecurring} style={{ background: C.gold, color: "#fff" }} className="text-xs px-3 py-1.5 rounded-md font-medium">Encerrar</button>
