@@ -283,6 +283,33 @@ async function apiFetchNotes(session) {
   return res.json();
 }
 
+// Busca leve (só a coluna "month") de todos os registros do usuário, usada
+// apenas para calcular XP/nível — não carrega os dados completos.
+async function apiFetchRecordMonths(session) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/records?select=month`, { headers: authHeaders(session) });
+  if (!res.ok) return [];
+  const rows = await res.json();
+  return rows.map((r) => r.month);
+}
+
+const LEVEL_XP_STEP = 150;
+const LEVEL_TITLES = [
+  { min: 1, title: "Iniciante" },
+  { min: 3, title: "Organizado" },
+  { min: 6, title: "Poupador" },
+  { min: 10, title: "Estrategista" },
+  { min: 15, title: "Investidor" },
+  { min: 20, title: "Mestre do Cofre" },
+];
+
+function computeLevel({ totalRecords, distinctMonths, completedNotes }) {
+  const xp = totalRecords * 10 + distinctMonths * 30 + completedNotes * 15;
+  const level = Math.floor(xp / LEVEL_XP_STEP) + 1;
+  const xpIntoLevel = xp % LEVEL_XP_STEP;
+  const title = [...LEVEL_TITLES].reverse().find((t) => level >= t.min)?.title || "Iniciante";
+  return { xp, level, xpIntoLevel, xpForNextLevel: LEVEL_XP_STEP, progressPct: Math.round((xpIntoLevel / LEVEL_XP_STEP) * 100), title };
+}
+
 async function apiInsertNote(session, note) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/notes`, {
     method: "POST",
@@ -507,25 +534,37 @@ function AuthScreen({ mode, onSwitch, onSubmit, onForgotPassword, error, notice 
   }
 
   return (
-    <div style={{ background: C.ink, fontFamily: "Inter, system-ui, sans-serif" }} className="min-h-screen w-full flex items-center justify-center p-6">
-      <div className="w-full max-w-4xl grid md:grid-cols-2 rounded-2xl overflow-hidden shadow-2xl">
-        <div style={{ background: `linear-gradient(155deg, ${C.ink} 0%, #1D3128 100%)`, color: C.paper }} className="hidden md:flex flex-col justify-between p-10">
-          <div className="flex items-center gap-2">
-            <div style={{ background: C.gold }} className="w-9 h-9 rounded-lg flex items-center justify-center"><Wallet size={18} color={C.ink} /></div>
+    <div style={{ background: C.ink, fontFamily: "Inter, system-ui, sans-serif" }} className="min-h-screen w-full flex items-center justify-center p-6 relative overflow-hidden">
+      <div style={{ background: `radial-gradient(circle, ${C.gold}33, transparent 70%)` }} className="absolute -top-40 -left-40 w-96 h-96 rounded-full blur-3xl pointer-events-none" />
+      <div style={{ background: `radial-gradient(circle, ${C.emerald}33, transparent 70%)` }} className="absolute -bottom-40 -right-20 w-96 h-96 rounded-full blur-3xl pointer-events-none" />
+
+      <div style={{ boxShadow: "0 25px 70px rgba(0,0,0,0.5)" }} className="relative w-full max-w-4xl grid md:grid-cols-2 rounded-2xl overflow-hidden">
+        <div style={{ background: `linear-gradient(155deg, ${C.ink} 0%, #1D3128 100%)`, color: C.paper }} className="hidden md:flex flex-col justify-between p-10 relative overflow-hidden">
+          <div style={{ background: `radial-gradient(circle at 80% 20%, ${C.gold}22, transparent 55%)` }} className="absolute inset-0 pointer-events-none" />
+          <div className="relative flex items-center gap-2">
+            <div style={{ background: `linear-gradient(135deg, #E2B354 0%, ${C.gold} 100%)`, boxShadow: "0 4px 14px rgba(184,132,46,0.4)" }} className="w-9 h-9 rounded-lg flex items-center justify-center"><Wallet size={18} color={C.ink} /></div>
             <span style={{ fontFamily: "Fraunces, serif" }} className="text-xl tracking-tight">Cofre</span>
           </div>
-          <div>
+          <div className="relative">
             <p style={{ fontFamily: "Fraunces, serif" }} className="text-3xl leading-snug mb-3">Cada real, com<br />seu devido lugar.</p>
-            <p style={{ color: C.paperDeep }} className="text-sm leading-relaxed opacity-80">
+            <p style={{ color: C.paperDeep }} className="text-sm leading-relaxed opacity-80 mb-6">
               Registre receitas, despesas fixas e variáveis, acompanhe a sobra do mês e planeje quanto investir — tudo organizado por mês.
             </p>
+            <div className="flex flex-col gap-2.5">
+              {["Controle mensal completo", "Metas com prazo e progresso", "Evolua de nível usando o app"].map((f) => (
+                <div key={f} className="flex items-center gap-2.5">
+                  <div style={{ background: C.gold }} className="w-1.5 h-1.5 rounded-full shrink-0" />
+                  <span style={{ color: C.paperDeep }} className="text-xs">{f}</span>
+                </div>
+              ))}
+            </div>
           </div>
-          <p style={{ color: C.paperDeep }} className="text-xs opacity-60">Seus dados ficam protegidos por conta, com login real via Supabase.</p>
+          <p style={{ color: C.paperDeep }} className="relative text-xs opacity-60">Seus dados ficam protegidos por conta, com login real via Supabase.</p>
         </div>
 
         <div style={{ background: C.card }} className="p-8 md:p-10 flex flex-col justify-center">
           <div className="md:hidden flex items-center gap-2 mb-6">
-            <div style={{ background: C.gold }} className="w-8 h-8 rounded-lg flex items-center justify-center"><Wallet size={16} color={C.ink} /></div>
+            <div style={{ background: `linear-gradient(135deg, #E2B354 0%, ${C.gold} 100%)` }} className="w-8 h-8 rounded-lg flex items-center justify-center"><Wallet size={16} color={C.ink} /></div>
             <span style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-lg">Cofre</span>
           </div>
 
@@ -682,6 +721,7 @@ function MainApp({ session, onLogout }) {
   const [subscriptionActive, setSubscriptionActive] = useState(false);
   const [notes, setNotes] = useState([]);
   const [notesLoaded, setNotesLoaded] = useState(false);
+  const [levelStats, setLevelStats] = useState(null); // computado quando o perfil é aberto
   const [showInvestEditor, setShowInvestEditor] = useState(false);
   const [modalType, setModalType] = useState(null);
   const [editingRecord, setEditingRecord] = useState(null);
@@ -796,6 +836,19 @@ function MainApp({ session, onLogout }) {
     try { await apiUpsertSettings(session, patch); pulse(); } catch (e) { setErrorMsg(e.message); }
   }
 
+  useEffect(() => {
+    if (view !== "profile") return;
+    (async () => {
+      const months = await apiFetchRecordMonths(session);
+      const completedNotes = notes.filter((n) => n.completed).length;
+      setLevelStats(computeLevel({
+        totalRecords: months.length,
+        distinctMonths: new Set(months).size,
+        completedNotes,
+      }));
+    })();
+  }, [view, notes]);
+
   async function addNote(note) {
     try {
       const saved = await apiInsertNote(session, note);
@@ -876,7 +929,7 @@ function MainApp({ session, onLogout }) {
             <NotesView notes={notes} loaded={notesLoaded} onAdd={addNote} onEdit={editNote} onToggle={toggleNote} onDelete={deleteNote} />
           )}
           {view === "profile" && (
-            <ProfileView profile={profile} email={session.user?.email} onSave={saveProfile} loaded={settingsLoaded} />
+            <ProfileView profile={profile} email={session.user?.email} onSave={saveProfile} loaded={settingsLoaded} levelStats={levelStats} />
           )}
         </main>
       </div>
@@ -948,10 +1001,10 @@ function Sidebar({ view, setView, onLogout, userEmail, profile }) {
     { id: "profile", label: "Perfil", icon: UserRound },
   ];
   return (
-    <aside style={{ background: C.ink }} className="w-60 shrink-0 hidden md:flex flex-col justify-between py-6 px-4">
+    <aside style={{ background: `linear-gradient(180deg, ${C.ink} 0%, #0D1712 100%)` }} className="w-60 shrink-0 hidden md:flex flex-col justify-between py-6 px-4">
       <div>
         <div className="flex items-center gap-2 px-2 mb-8">
-          <div style={{ background: C.gold }} className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"><Wallet size={16} color={C.ink} /></div>
+          <div style={{ background: `linear-gradient(135deg, #E2B354 0%, ${C.gold} 100%)`, boxShadow: "0 4px 14px rgba(184,132,46,0.35)" }} className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"><Wallet size={16} color={C.ink} /></div>
           <span style={{ fontFamily: "Fraunces, serif", color: C.paper }} className="text-lg">Cofre</span>
         </div>
         <nav className="flex flex-col gap-1">
@@ -959,8 +1012,12 @@ function Sidebar({ view, setView, onLogout, userEmail, profile }) {
             const Icon = it.icon; const active = view === it.id;
             return (
               <button key={it.id} onClick={() => setView(it.id)}
-                style={{ background: active ? "rgba(255,255,255,0.08)" : "transparent", color: active ? C.paper : C.paperDeep }}
-                className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-left transition hover:bg-white/5">
+                style={{
+                  background: active ? `linear-gradient(90deg, rgba(184,132,46,0.22) 0%, rgba(184,132,46,0.05) 100%)` : "transparent",
+                  color: active ? C.gold : C.paperDeep,
+                  borderLeft: active ? `2px solid ${C.gold}` : "2px solid transparent",
+                }}
+                className="flex items-center gap-3 px-3 py-2.5 rounded-r-lg text-sm text-left transition hover:bg-white/5">
                 <Icon size={17} />{it.label}
               </button>
             );
@@ -970,9 +1027,9 @@ function Sidebar({ view, setView, onLogout, userEmail, profile }) {
       <div>
         <button onClick={() => setView("profile")} style={{ borderColor: "rgba(255,255,255,0.1)" }} className="border-t pt-4 mb-2 flex items-center gap-2 px-2 w-full hover:opacity-80 transition">
           {profile?.avatar_data ? (
-            <img src={profile.avatar_data} alt="" className="w-7 h-7 rounded-full object-cover shrink-0" />
+            <img src={profile.avatar_data} alt="" className="w-7 h-7 rounded-full object-cover shrink-0 ring-2" style={{ "--tw-ring-color": C.gold }} />
           ) : (
-            <div style={{ background: C.emerald }} className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium shrink-0">
+            <div style={{ background: `linear-gradient(135deg, ${C.emerald} 0%, #123B2E 100%)` }} className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium shrink-0">
               <span style={{ color: C.paper }}>{(profile?.name || userEmail || "V")[0].toUpperCase()}</span>
             </div>
           )}
@@ -1055,24 +1112,46 @@ function Overview({ totals, investPct, investCalc, onOpenInvestEditor, loading }
     <div>
       <p style={{ color: C.inkSoft }} className="text-sm mb-6">Resumo do mês selecionado.</p>
       <div className="grid sm:grid-cols-3 gap-4 max-w-4xl">
-        <SummaryCard label="Receita do mês" value={loading ? "…" : currency(totals.receita)} icon={<TrendingDown size={18} style={{ transform: "rotate(180deg)" }} />} tint={C.emeraldSoft} accent={C.emerald} />
-        <SummaryCard label="Despesas do mês" value={loading ? "…" : currency(totals.despesas)} icon={<TrendingDown size={18} />} tint={C.rustSoft} accent={C.rust} />
-        <SummaryCard label="Investir" value={loading ? "…" : currency(investCalc)} icon={<PiggyBank size={18} />} tint={C.goldSoft} accent={C.gold} onSettings={onOpenInvestEditor} footnote={`${investPct}% da receita sugerido`} />
+        <SummaryCard
+          label="Receita do mês"
+          value={loading ? "…" : currency(totals.receita)}
+          icon={<TrendingDown size={19} style={{ transform: "rotate(180deg)" }} />}
+          gradient={`linear-gradient(135deg, ${C.emerald} 0%, #123B2E 100%)`}
+        />
+        <SummaryCard
+          label="Despesas do mês"
+          value={loading ? "…" : currency(totals.despesas)}
+          icon={<TrendingDown size={19} />}
+          gradient={`linear-gradient(135deg, ${C.rust} 0%, #5C2318 100%)`}
+        />
+        <SummaryCard
+          label="Investir"
+          value={loading ? "…" : currency(investCalc)}
+          icon={<PiggyBank size={19} />}
+          gradient={`linear-gradient(135deg, ${C.gold} 0%, #6E4D14 100%)`}
+          onSettings={onOpenInvestEditor}
+          footnote={`${investPct}% da receita sugerido`}
+        />
       </div>
     </div>
   );
 }
 
-function SummaryCard({ label, value, icon, tint, accent, onSettings, footnote }) {
+function SummaryCard({ label, value, icon, gradient, onSettings, footnote }) {
   return (
-    <div style={{ background: C.card, borderColor: C.line }} className="rounded-xl border p-5 relative">
-      <div className="flex items-center justify-between mb-4">
-        <div style={{ background: tint, color: accent }} className="w-9 h-9 rounded-lg flex items-center justify-center">{icon}</div>
-        {onSettings && <button onClick={onSettings} style={{ color: C.inkSoft }} className="hover:text-black transition" title="Ajustar percentual"><Settings2 size={17} /></button>}
+    <div style={{ background: gradient }} className="rounded-2xl p-5 relative overflow-hidden shadow-lg">
+      <div style={{ background: "radial-gradient(circle at 100% 0%, rgba(255,255,255,0.14), transparent 60%)" }} className="absolute inset-0 pointer-events-none" />
+      <div className="relative flex items-center justify-between mb-5">
+        <div style={{ background: "rgba(255,255,255,0.16)", color: C.paper }} className="w-10 h-10 rounded-xl flex items-center justify-center backdrop-blur-sm">{icon}</div>
+        {onSettings && (
+          <button onClick={onSettings} style={{ color: "rgba(255,255,255,0.75)" }} className="hover:text-white transition" title="Ajustar percentual">
+            <Settings2 size={17} />
+          </button>
+        )}
       </div>
-      <p style={{ color: C.inkSoft }} className="text-xs uppercase tracking-wide mb-1">{label}</p>
-      <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-2xl">{value}</p>
-      {footnote && <p style={{ color: accent }} className="text-xs mt-1.5 font-medium">{footnote}</p>}
+      <p style={{ color: "rgba(255,255,255,0.72)" }} className="relative text-xs uppercase tracking-wide mb-1 font-medium">{label}</p>
+      <p style={{ fontFamily: "Fraunces, serif", color: C.paper }} className="relative text-[26px] leading-tight">{value}</p>
+      {footnote && <p style={{ color: "rgba(255,255,255,0.85)" }} className="relative text-xs mt-2 font-medium">{footnote}</p>}
     </div>
   );
 }
@@ -1502,7 +1581,7 @@ function resizeImageToDataUrl(file, maxSize = 240) {
   });
 }
 
-function ProfileView({ profile, email, onSave, loaded }) {
+function ProfileView({ profile, email, onSave, loaded, levelStats }) {
   const [name, setName] = useState(profile?.name || "");
   const [age, setAge] = useState(profile?.age ?? "");
   const [avatar, setAvatar] = useState(profile?.avatar_data || null);
@@ -1539,6 +1618,43 @@ function ProfileView({ profile, email, onSave, loaded }) {
     <div className="max-w-md">
       <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-xl mb-1">Seu perfil</p>
       <p style={{ color: C.inkSoft }} className="text-sm mb-6">Essas informações ficam só na sua conta.</p>
+
+      <div style={{ background: `linear-gradient(135deg, ${C.ink} 0%, #1D3128 100%)` }} className="rounded-2xl p-5 mb-6 relative overflow-hidden">
+        <div style={{ background: `radial-gradient(circle at 90% 0%, ${C.gold}2A, transparent 60%)` }} className="absolute inset-0 pointer-events-none" />
+        <div className="relative flex items-center gap-4 mb-4">
+          <div className="relative shrink-0">
+            <div style={{ background: C.paperDeep }} className="w-16 h-16 rounded-full overflow-hidden flex items-center justify-center ring-2" style={{ "--tw-ring-color": C.gold }}>
+              {avatar ? <img src={avatar} alt="" className="w-full h-full object-cover" /> : <UserRound size={26} style={{ color: C.inkSoft }} />}
+            </div>
+            {levelStats && (
+              <div style={{ background: `linear-gradient(135deg, #E2B354 0%, ${C.gold} 100%)`, borderColor: C.ink, color: C.ink }} className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full border-2 flex items-center justify-center text-[10px] font-bold">
+                {levelStats.level}
+              </div>
+            )}
+          </div>
+          <div className="min-w-0">
+            <p style={{ color: C.paper }} className="text-sm font-medium truncate">{name || "Você"}</p>
+            {levelStats ? (
+              <p style={{ color: C.gold }} className="text-xs font-medium">Nível {levelStats.level} · {levelStats.title}</p>
+            ) : (
+              <p style={{ color: C.paperDeep }} className="text-xs">Calculando nível…</p>
+            )}
+          </div>
+        </div>
+        {levelStats && (
+          <div className="relative">
+            <div style={{ background: "rgba(255,255,255,0.12)" }} className="w-full h-2 rounded-full overflow-hidden">
+              <div style={{ width: `${levelStats.progressPct}%`, background: `linear-gradient(90deg, ${C.gold} 0%, #E2B354 100%)` }} className="h-full rounded-full transition-all duration-500" />
+            </div>
+            <p style={{ color: C.paperDeep }} className="text-[11px] mt-1.5">
+              {levelStats.xpIntoLevel} / {levelStats.xpForNextLevel} XP para o nível {levelStats.level + 1}
+            </p>
+            <p style={{ color: C.paperDeep, opacity: 0.75 }} className="text-[11px] mt-2 leading-relaxed">
+              Ganhe XP registrando receitas e despesas, concluindo metas e usando o Cofre todo mês.
+            </p>
+          </div>
+        )}
+      </div>
 
       <div className="flex items-center gap-4 mb-6">
         <div style={{ background: C.paperDeep }} className="w-20 h-20 rounded-full overflow-hidden flex items-center justify-center shrink-0">
