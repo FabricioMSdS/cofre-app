@@ -338,6 +338,43 @@ async function apiDeleteNote(session, id) {
   return true;
 }
 
+/* ------------------------------ investimentos ----------------------------------- */
+
+async function apiFetchInvestments(session) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/investments?order=date.desc`, { headers: authHeaders(session) });
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao buscar investimentos."));
+  const rows = await res.json();
+  return rows.map((r) => ({ ...r, value: Number(r.value) }));
+}
+
+async function apiInsertInvestment(session, inv) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/investments`, {
+    method: "POST",
+    headers: authHeaders(session, { Prefer: "return=representation" }),
+    body: JSON.stringify({ ...inv, user_id: session.user.id }),
+  });
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao salvar investimento."));
+  const rows = await res.json();
+  return { ...rows[0], value: Number(rows[0].value) };
+}
+
+async function apiUpdateInvestment(session, id, patch) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/investments?id=eq.${id}`, {
+    method: "PATCH",
+    headers: authHeaders(session, { Prefer: "return=representation" }),
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao atualizar investimento."));
+  const rows = await res.json();
+  return { ...rows[0], value: Number(rows[0].value) };
+}
+
+async function apiDeleteInvestment(session, id) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/investments?id=eq.${id}`, { method: "DELETE", headers: authHeaders(session) });
+  if (!res.ok) throw new Error(await pgErrorMessage(res, "Erro ao excluir investimento."));
+  return true;
+}
+
 /* ---------------------------------- tokens --------------------------------- */
 
 const C = {
@@ -721,6 +758,8 @@ function MainApp({ session, onLogout }) {
   const [subscriptionActive, setSubscriptionActive] = useState(false);
   const [notes, setNotes] = useState([]);
   const [notesLoaded, setNotesLoaded] = useState(false);
+  const [investments, setInvestments] = useState([]);
+  const [investmentsLoaded, setInvestmentsLoaded] = useState(false);
   const [levelStats, setLevelStats] = useState(null); // computado quando o perfil é aberto
   const [showInvestEditor, setShowInvestEditor] = useState(false);
   const [modalType, setModalType] = useState(null);
@@ -753,6 +792,13 @@ function MainApp({ session, onLogout }) {
         setNotes(rows);
       } catch (e) { setErrorMsg(e.message); }
       setNotesLoaded(true);
+    })();
+    (async () => {
+      try {
+        const rows = await apiFetchInvestments(session);
+        setInvestments(rows);
+      } catch (e) { setErrorMsg(e.message); }
+      setInvestmentsLoaded(true);
     })();
   }, []);
 
@@ -877,6 +923,29 @@ function MainApp({ session, onLogout }) {
     } catch (e) { setErrorMsg(e.message); }
   }
 
+  async function addInvestment(inv) {
+    try {
+      const saved = await apiInsertInvestment(session, inv);
+      setInvestments((p) => [saved, ...p]);
+      pulse();
+    } catch (e) { setErrorMsg(e.message); }
+  }
+
+  async function editInvestment(id, patch) {
+    try {
+      const saved = await apiUpdateInvestment(session, id, patch);
+      setInvestments((p) => p.map((i) => (i.id === id ? saved : i)));
+      pulse();
+    } catch (e) { setErrorMsg(e.message); }
+  }
+
+  async function deleteInvestment(id) {
+    try {
+      await apiDeleteInvestment(session, id);
+      setInvestments((p) => p.filter((i) => i.id !== id));
+    } catch (e) { setErrorMsg(e.message); }
+  }
+
   const totals = useMemo(() => {
     const sum = (types) => activeRecords.filter((r) => types.includes(r.type)).reduce((a, r) => a + r.value, 0);
     return { receita: sum(["receita"]), despesas: sum(["despesa_fixa", "despesa_variavel"]) };
@@ -926,7 +995,10 @@ function MainApp({ session, onLogout }) {
             />
           )}
           {view === "notes" && (
-            <NotesView notes={notes} loaded={notesLoaded} onAdd={addNote} onEdit={editNote} onToggle={toggleNote} onDelete={deleteNote} />
+            <NotesView
+              notes={notes} loaded={notesLoaded} onAdd={addNote} onEdit={editNote} onToggle={toggleNote} onDelete={deleteNote}
+              investments={investments} investmentsLoaded={investmentsLoaded} onAddInvestment={addInvestment} onEditInvestment={editInvestment} onDeleteInvestment={deleteInvestment}
+            />
           )}
           {view === "profile" && (
             <ProfileView profile={profile} email={session.user?.email} onSave={saveProfile} loaded={settingsLoaded} levelStats={levelStats} />
@@ -1108,6 +1180,7 @@ function Paywall({ email, onLogout }) {
 /* -------------------------------- overview ------------------------------------ */
 
 function Overview({ totals, investPct, investCalc, onOpenInvestEditor, loading }) {
+  const sobra = (totals.receita || 0) - (totals.despesas || 0);
   return (
     <div>
       <p style={{ color: C.inkSoft }} className="text-sm mb-6">Resumo do mês selecionado.</p>
@@ -1117,6 +1190,7 @@ function Overview({ totals, investPct, investCalc, onOpenInvestEditor, loading }
           value={loading ? "…" : currency(totals.receita)}
           icon={<TrendingDown size={19} style={{ transform: "rotate(180deg)" }} />}
           gradient={`linear-gradient(135deg, ${C.emerald} 0%, #123B2E 100%)`}
+          footnote={loading ? undefined : `Sobra do mês: ${currency(sobra)}`}
         />
         <SummaryCard
           label="Despesas do mês"
@@ -1451,7 +1525,28 @@ function isOverdue(note) {
   return new Date(note.due_date + "T00:00:00") < today;
 }
 
-function NotesView({ notes, loaded, onAdd, onEdit, onToggle, onDelete }) {
+function NotesView({ notes, loaded, onAdd, onEdit, onToggle, onDelete, investments, investmentsLoaded, onAddInvestment, onEditInvestment, onDeleteInvestment }) {
+  const [tab, setTab] = useState("metas");
+  return (
+    <div className="max-w-2xl">
+      <div style={{ borderColor: C.line }} className="flex rounded-lg border p-1 gap-1 mb-5 w-fit" role="tablist">
+        <button onClick={() => setTab("metas")} style={{ background: tab === "metas" ? C.ink : "transparent", color: tab === "metas" ? C.paper : C.inkSoft }} className="px-4 py-1.5 rounded-md text-sm font-medium transition flex items-center gap-1.5">
+          <StickyNote size={14} /> Metas & anotações
+        </button>
+        <button onClick={() => setTab("investimentos")} style={{ background: tab === "investimentos" ? C.ink : "transparent", color: tab === "investimentos" ? C.paper : C.inkSoft }} className="px-4 py-1.5 rounded-md text-sm font-medium transition flex items-center gap-1.5">
+          <PiggyBank size={14} /> Investimentos
+        </button>
+      </div>
+      {tab === "metas" ? (
+        <GoalsPanel notes={notes} loaded={loaded} onAdd={onAdd} onEdit={onEdit} onToggle={onToggle} onDelete={onDelete} />
+      ) : (
+        <InvestmentsPanel investments={investments} loaded={investmentsLoaded} onAdd={onAddInvestment} onEdit={onEditInvestment} onDelete={onDeleteInvestment} />
+      )}
+    </div>
+  );
+}
+
+function GoalsPanel({ notes, loaded, onAdd, onEdit, onToggle, onDelete }) {
   const [formMode, setFormMode] = useState(null); // null | "new" | note object sendo editado
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
@@ -1484,7 +1579,7 @@ function NotesView({ notes, loaded, onAdd, onEdit, onToggle, onDelete }) {
   }
 
   return (
-    <div className="max-w-2xl">
+    <div>
       <div className="flex items-center justify-between mb-5">
         <div>
           <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-xl">Anotações & metas</p>
@@ -1550,6 +1645,120 @@ function NotesView({ notes, loaded, onAdd, onEdit, onToggle, onDelete }) {
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------ investimentos por instituição ------------------------------ */
+
+function InvestmentsPanel({ investments, loaded, onAdd, onEdit, onDelete }) {
+  const [formMode, setFormMode] = useState(null); // null | "new" | investimento sendo editado
+  const [bank, setBank] = useState("");
+  const [value, setValue] = useState("");
+  const [date, setDate] = useState("");
+  const [saving, setSaving] = useState(false);
+  const isEditing = formMode && formMode !== "new";
+
+  const total = useMemo(() => investments.reduce((a, i) => a + i.value, 0), [investments]);
+  const byBank = useMemo(() => {
+    const map = {};
+    investments.forEach((i) => { map[i.bank] = (map[i.bank] || 0) + i.value; });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  }, [investments]);
+
+  function openNew() {
+    setBank(""); setValue(""); setDate(""); setFormMode("new");
+  }
+  function openEdit(inv) {
+    setBank(inv.bank); setValue(String(inv.value)); setDate(inv.date); setFormMode(inv);
+  }
+  function closeForm() { setFormMode(null); }
+
+  async function handleSave() {
+    if (!bank.trim() || !value || !date) return;
+    setSaving(true);
+    if (isEditing) {
+      await onEdit(formMode.id, { bank: bank.trim(), value: Number(value), date });
+    } else {
+      await onAdd({ bank: bank.trim(), value: Number(value), date });
+    }
+    setSaving(false);
+    closeForm();
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
+        <div>
+          <p style={{ fontFamily: "Fraunces, serif", color: C.ink }} className="text-xl">Investimentos</p>
+          <p style={{ color: C.inkSoft }} className="text-sm mt-0.5">Onde o seu dinheiro investido está guardado, banco a banco.</p>
+        </div>
+        <button onClick={openNew} style={{ background: C.ink, color: C.paper }} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-90 transition shrink-0">
+          <Plus size={16} /> Novo investimento
+        </button>
+      </div>
+
+      <div style={{ background: `linear-gradient(135deg, ${C.gold} 0%, #6E4D14 100%)` }} className="rounded-2xl p-5 mb-5 relative overflow-hidden">
+        <div style={{ background: "radial-gradient(circle at 100% 0%, rgba(255,255,255,0.16), transparent 60%)" }} className="absolute inset-0 pointer-events-none" />
+        <div className="relative flex items-center gap-3 mb-1">
+          <div style={{ background: "rgba(255,255,255,0.18)" }} className="w-9 h-9 rounded-xl flex items-center justify-center"><PiggyBank size={18} color={C.paper} /></div>
+          <p style={{ color: "rgba(255,255,255,0.85)" }} className="text-xs uppercase tracking-wide font-medium">Total investido (todas as instituições)</p>
+        </div>
+        <p style={{ fontFamily: "Fraunces, serif", color: C.paper }} className="relative text-3xl mt-2">{loaded ? currency(total) : "…"}</p>
+        {byBank.length > 1 && (
+          <div className="relative flex flex-wrap gap-x-4 gap-y-1 mt-3">
+            {byBank.map(([bankName, val]) => (
+              <span key={bankName} style={{ color: "rgba(255,255,255,0.85)" }} className="text-xs">
+                <strong style={{ color: C.paper }}>{bankName}:</strong> {currency(val)}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {formMode && (
+        <div style={{ background: C.card, borderColor: C.line }} className="rounded-xl border p-4 mb-5 flex flex-col gap-3">
+          <p style={{ color: C.inkSoft }} className="text-xs uppercase tracking-wide font-medium">{isEditing ? "Editar investimento" : "Novo investimento"}</p>
+          <Field label="Banco / instituição" icon={<PiggyBank size={15} />}>
+            <input value={bank} onChange={(e) => setBank(e.target.value)} placeholder="Ex: Nubank, XP, Banco do Brasil" className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Valor (R$)" icon={<ChevronRight size={14} style={{ opacity: 0 }} />}>
+              <input type="number" min="0" step="0.01" value={value} onChange={(e) => setValue(e.target.value)} placeholder="0,00" className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
+            </Field>
+            <Field label="Data" icon={<CalendarDays size={15} />}>
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full bg-transparent outline-none text-sm" style={{ color: C.ink }} />
+            </Field>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={closeForm} style={{ color: C.inkSoft, borderColor: C.line }} className="flex-1 border rounded-lg py-2 text-sm">Cancelar</button>
+            <button type="button" disabled={saving} onClick={handleSave} style={{ background: C.ink, color: C.paper, opacity: saving ? 0.7 : 1 }} className="flex-1 rounded-lg py-2 text-sm font-medium flex items-center justify-center gap-2">
+              {saving ? <Loader2 size={15} className="animate-spin" /> : "Salvar"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!loaded ? (
+        <p style={{ color: C.inkSoft }} className="text-sm">Carregando…</p>
+      ) : investments.length === 0 ? (
+        <p style={{ color: C.inkSoft }} className="text-sm">Nenhum investimento registrado ainda. Use "Novo investimento" para começar.</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {investments.map((inv) => (
+            <div key={inv.id} style={{ background: C.card, borderColor: C.line }} className="rounded-xl border p-3.5 flex items-center gap-3">
+              <div style={{ background: C.goldSoft, color: C.gold }} className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"><PiggyBank size={16} /></div>
+              <button onClick={() => openEdit(inv)} className="min-w-0 flex-1 text-left">
+                <p style={{ color: C.ink }} className="text-sm font-medium truncate">{inv.bank}</p>
+                <p style={{ color: C.inkSoft }} className="text-xs mt-0.5">{inv.date?.split("-").reverse().join("/")}</p>
+              </button>
+              <span style={{ color: C.ink }} className="text-sm font-semibold shrink-0">{currency(inv.value)}</span>
+              <button onClick={() => openEdit(inv)} style={{ color: C.inkSoft }} className="shrink-0 hover:text-black transition" title="Editar"><Pencil size={15} /></button>
+              <button onClick={() => onDelete(inv.id)} style={{ color: C.inkSoft }} className="shrink-0 hover:text-black transition" title="Excluir"><Trash2 size={16} /></button>
+            </div>
+          ))}
         </div>
       )}
     </div>
